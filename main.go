@@ -2,15 +2,13 @@ package main
 
 import (
 	"log"
-
-	"prompter-live-go/cmd" // ★ このパスは、go mod init で指定したモジュール名に依存します
+	"prompter-live-go/cmd"
 )
 
 func main() {
-	// ログの形式を改善し、タイムスタンプを付加
-	log.SetFlags(log.Ldate | log.Ltime | log.Lshortfile)
-
-	if err := cmd.RootCmd.Execute(); err != nil {
-		log.Fatal(err)
+	// エラーが発生した場合、ログに出力してプログラムを終了する
+	if err := cmd.Execute(); err != nil {
+		// CobraのExecute()は通常、エラーを内部で処理するため、このログは致命的なエラーに限定されます
+		log.Fatalf("CLI tool execution failed: %v", err)
 	}
 }

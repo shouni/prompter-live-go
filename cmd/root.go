@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"fmt"
 	"os"
 
 	"github.com/spf13/cobra"
@@ -20,11 +19,15 @@ var RootCmd = &cobra.Command{
 }
 
 // Execute はルートコマンドの実行を担います。main.goから呼び出されます。
-func Execute() {
-	if err := RootCmd.Execute(); err != nil {
-		fmt.Println(err)
-		os.Exit(1)
-	}
+func Execute() error {
+	// ここでサブコマンドをルートに追加
+	// Goのパッケージシステムにより、authCmdとrunCmdは自動的にこのパッケージ内で利用可能です
+	RootCmd.AddCommand(authCmd)
+	RootCmd.AddCommand(runCmd)
+
+	// ... 省略 ...
+
+	return RootCmd.Execute()
 }
 
 // 永続的なフラグ（すべてのサブコマンドで利用可能）を定義します。
