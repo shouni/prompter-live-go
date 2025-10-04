@@ -29,10 +29,8 @@
 Thumbs.db
 
 # app
-git-gemini-reviewer-go
-gemini-reviewer-go
-gemini-reviewer
-reviewer-go
+gemini_reviewer	prompter_live
+
 # Temporary testing directories/files
 /bin/
 /var/
