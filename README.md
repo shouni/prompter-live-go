@@ -4,8 +4,6 @@
 [![Go Version](https://img.shields.io/github/go-mod/go-version/shouni/git-gemini-reviewer-go)](https://golang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
------
-
 ## 🚀 概要 (About) - エンゲージメントを掴み、サイト誘導を加速するAIプロモーションパートナー
 
 **`Prompter Live Go`** は、**Google Gemini の強力なAI**と**Go言語の並行処理能力**を活用し、YouTube配信や動画のコメント欄を**生きたプロモーション導線**に変えるコマンドラインツールです。
@@ -34,7 +32,7 @@
 | **言語** | **Go (Golang)** | ツールの開発言語。リアルタイム応答に必要な高い並行処理性能を提供します。 |
 | **CLI フレームワーク** | **Cobra** | コマンドライン引数や認証フローを管理するための構造化を提供します。 |
 | **AI モデル** | **Google Gemini API** | 視聴者のコメント分析、キャラクター設定に基づいた応答テキストのリアルタイム生成に使用します。 |
-| **YouTube 連携** | **Google OAuth 2.0 / YouTube Data API v3** | チャンネル所有者としての認証（OAuth）フローの実装と、コメントのポーリング、応答コメントのポストに使用します。 |
+| **YouTube 連携** | **Google OAuth 2.0 / YouTube Data API v3** | チャンネル所有者としての認証（OAuth）フロー、コメントのポーリング、応答コメントのポストに使用します。 |
 | **リアルタイム処理** | **Go Goroutine & Channel** | コメントのポーリング、AI処理、APIポストを並行して実行し、低遅延での応答を実現します。 |
 
 -----
@@ -136,6 +134,20 @@ prompter-live-go/
 
 -----
 
+### ⚠️ 動作原理に関する重要な注意点
+
+本ツールは、YouTube Data API の仕様に基づき、以下の方法で動作します。
+
+1.  **ポーリング（定期取得）を採用**: YouTube API は、Slack や GitHub のようなリアルタイムな Webhook（プッシュ通知）を提供していません。そのため、本ツールは指定された間隔（`--polling-interval`）で API へ問い合わせを行う「**ポーリング**」方式を採用しています。
+2.  **API クォータの消費**: ポーリングのたびに YouTube API のクォータ（利用制限）を消費します。頻度を高く設定しすぎると、クォータを使い切る可能性があるため、適切な間隔を設定してください。
+3.  **OAuth認証が必須**: コメントの投稿には、チャンネル所有者としての権限が必要なため、必ず `auth` コマンドで OAuth 2.0 認証を完了させてください。
+
+-----
+
 ### 📜 ライセンス (License)
 
 このプロジェクトは [MIT License](https://opensource.org/licenses/MIT) の下で公開されています。
+
+-----
+
+これで「Prompter Live Go」の README は完成です！次は、いよいよ Go のコード実装の最初のステップ、**`main.go`** と **`cmd/root.go`** の初期コード設定に進みましょう。
