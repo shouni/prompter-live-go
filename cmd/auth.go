@@ -8,10 +8,11 @@ import (
 	"os"
 	"time"
 
-	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
 	"prompter-live-go/internal/apis"
 	"prompter-live-go/internal/util"
+
+	"github.com/spf13/cobra"
+	"golang.org/x/oauth2"
 )
 
 // トークン保存先ファイルパス (ハードコードを維持。フラグ化は不要と判断)
@@ -54,18 +55,16 @@ YouTubeチャンネルへのコメント投稿権限を取得するためのOAut
 		}
 
 		// 3. ローカルサーバーを起動し、認証コードを待ち受ける
-		server := apis.NewOAuthServer(authFlags.oauthPort) // ⭐️ フラグを使用
-		server.Start()
-
-		// 4. ユーザーを認証URLに誘導
-		// ⭐️ 【修正箇所】CSRF対策: ランダムなstate値を生成
+		server := apis.NewOAuthServer(authFlags.oauthPort) //
 		b := make([]byte, 16)
 		rand.Read(b)
 		state := base64.URLEncoding.EncodeToString(b)
 
-		// TODO: stateをセッション等に保存し、コールバックで検証するロジックを実装
-		// (現時点ではコールバック時の検証ロジックはスキップしますが、stateはランダム化します)
+		server.ExpectedState = state
+		server.Start()
 
+		// 4. ユーザーを認証URLに誘導
+		// 認証URLにランダムなstateを含める
 		authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 		fmt.Printf("\n🚀 以下のURLをブラウザで開いて、YouTubeチャンネルに権限を与えてください:\n%s\n", authURL)
 
@@ -76,11 +75,9 @@ YouTubeチャンネルへのコメント投稿権限を取得するためのOAut
 		var code string
 		select {
 		case code = <-server.CodeChan:
-			// コードを受信
-			server.Stop() // ⭐️ 【修正箇所】サーバー停止をここに移動
+			server.Stop()
 			if code == "" {
-				// エラーハンドラーから空文字列が送られた場合
-				return fmt.Errorf("\n❌ 認証中にエラーが発生しました。詳細はブラウザを確認してください。")
+				return fmt.Errorf("\n❌ 認証コードの受信中にエラーが発生しました。不正なStateまたは認証失敗です。")
 			}
 		case <-ctx.Done():
 			// タイムアウト

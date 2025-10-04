@@ -14,6 +14,8 @@ type OAuthServer struct {
 	server *http.Server
 	// サーバーが待ち受けるポート
 	port string
+	// CSRF対策：期待されるstate値を格納
+	ExpectedState string
 }
 
 // NewOAuthServer は新しいOAuthServerのインスタンスを作成します。
@@ -62,6 +64,19 @@ func (s *OAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 	// r.Context()がキャンセルされる前に処理を完了させる
 
 	code := r.URL.Query().Get("code")
+	receivedState := r.URL.Query().Get("state")
+
+	// 期待されるstateと受信したstateを比較し、不一致ならエラーとする
+	if receivedState != s.ExpectedState {
+		errorMsg := "CSRF攻撃の可能性、またはstateパラメータが不正です。"
+		// ユーザーに表示するエラーメッセージをブラウザに出力
+		w.WriteHeader(http.StatusUnauthorized)
+		fmt.Fprintf(w, "<h1>認証エラー (セキュリティ)</h1><p>%s</p><p>認証を最初からやり直してください。</p>", errorMsg)
+
+		// auth.go側へは空文字列（エラー通知）を送信
+		s.CodeChan <- ""
+		return
+	}
 
 	if code != "" {
 		// 認証コードをチャネルに送信（チャネルのクローズは呼び出し元が行う）
