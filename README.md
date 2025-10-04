@@ -148,6 +148,3 @@ prompter-live-go/
 
 このプロジェクトは [MIT License](https://opensource.org/licenses/MIT) の下で公開されています。
 
------
-
-これで「Prompter Live Go」の README は完成です！次は、いよいよ Go のコード実装の最初のステップ、**`main.go`** と **`cmd/root.go`** の初期コード設定に進みましょう。
