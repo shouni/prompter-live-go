@@ -19,6 +19,7 @@ type OAuthServer struct {
 // NewOAuthServer は新しいOAuthServerのインスタンスを作成します。
 func NewOAuthServer(port string) *OAuthServer {
 	return &OAuthServer{
+		// バッファなしのチャネルを作成
 		CodeChan: make(chan string),
 		port:     port,
 	}
@@ -43,25 +44,27 @@ func (s *OAuthServer) Start() {
 	}()
 }
 
-// Stop はサーバーを停止します。
+// Stop はサーバーを停止し、チャネルをクローズします。
+// チャネルのクローズ責任は、呼び出し元（cmd/auth.go）に移譲されました。
 func (s *OAuthServer) Stop() {
 	if s.server != nil {
 		// タイムアウトを設定してサーバーを停止
 		ctx, cancel := context.WithTimeout(context.Background(), 5)
 		defer cancel()
 		s.server.Shutdown(ctx)
-		// CodeChanを閉じ、リソースを解放
+		// サーバーを停止した後にチャネルをクローズ
 		close(s.CodeChan)
 	}
 }
 
 // handleCallback は Googleからの認証コードを含むリクエストを処理します。
 func (s *OAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
-	// URLクエリから認証コードを取得
+	// r.Context()がキャンセルされる前に処理を完了させる
+
 	code := r.URL.Query().Get("code")
 
 	if code != "" {
-		// 認証コードをチャネルに送信
+		// 認証コードをチャネルに送信（チャネルのクローズは呼び出し元が行う）
 		s.CodeChan <- code
 
 		// ユーザーのブラウザに応答メッセージを返す
@@ -72,9 +75,10 @@ func (s *OAuthServer) handleCallback(w http.ResponseWriter, r *http.Request) {
 		errorMsg := r.URL.Query().Get("error")
 		w.WriteHeader(http.StatusBadRequest)
 		fmt.Fprintf(w, "<h1>認証エラー</h1><p>認証に失敗しました: %s</p>", errorMsg)
-		// エラーの場合もチャネルに空文字列を送るなどで処理を先に進める設計も可能
+
+		// エラー時にも auth.go が待機を解除できるよう、空文字列を送信
+		s.CodeChan <- ""
 	}
 
-	// コードを受け取ったら、即座にサーバーを停止
-	s.Stop()
+	// ⚠️ ここでの s.Stop() は削除済み
 }

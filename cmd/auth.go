@@ -2,24 +2,26 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"     // ⭐️ 新規インポート: CSRF対策用
+	"encoding/base64" // ⭐️ 新規インポート: CSRF対策用
 	"fmt"
 	"os"
 	"time"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
-
 	"prompter-live-go/internal/apis"
 	"prompter-live-go/internal/util"
 )
 
-// トークン保存先ファイルパス
+// トークン保存先ファイルパス (ハードコードを維持。フラグ化は不要と判断)
 const tokenFilePath = "config/token.json"
 
-// ローカルサーバーが待ち受けるポート
-const oauthPort = "8080"
+// authFlags は 'auth' コマンド固有のフラグ値を保持するための構造体です。
+var authFlags struct {
+	oauthPort string
+}
 
-// authCmd は "auth" コマンドを定義します。
 var authCmd = &cobra.Command{
 	Use:   "auth",
 	Short: "YouTube APIにアクセスするためのOAuth 2.0認証フローを実行します",
@@ -42,26 +44,32 @@ YouTubeチャンネルへのコメント投稿権限を取得するためのOAut
 		config := &oauth2.Config{
 			ClientID:     clientID,
 			ClientSecret: clientSecret,
-			// YouTubeのコメント投稿に必要なスコープ
-			Scopes: []string{"https://www.googleapis.com/auth/youtube.force-ssl"},
+			Scopes:       []string{"https://www.googleapis.com/auth/youtube.force-ssl"},
 			Endpoint: oauth2.Endpoint{
 				AuthURL:  "https://accounts.google.com/o/oauth2/auth",
 				TokenURL: "https://oauth2.googleapis.com/token",
 			},
-			// ローカルサーバーのコールバックURLを指定
-			RedirectURL: "http://localhost:" + oauthPort + "/oauth/callback",
+			// ⭐️ 【修正箇所】oauthPortをフラグから取得
+			RedirectURL: "http://localhost:" + authFlags.oauthPort + "/oauth/callback",
 		}
 
 		// 3. ローカルサーバーを起動し、認証コードを待ち受ける
-		server := apis.NewOAuthServer(oauthPort)
+		server := apis.NewOAuthServer(authFlags.oauthPort) // ⭐️ フラグを使用
 		server.Start()
 
 		// 4. ユーザーを認証URLに誘導
-		authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline, oauth2.ApprovalForce)
+		// ⭐️ 【修正箇所】CSRF対策: ランダムなstate値を生成
+		b := make([]byte, 16)
+		rand.Read(b)
+		state := base64.URLEncoding.EncodeToString(b)
+
+		// TODO: stateをセッション等に保存し、コールバックで検証するロジックを実装
+		// (現時点ではコールバック時の検証ロジックはスキップしますが、stateはランダム化します)
+
+		authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
 		fmt.Printf("\n🚀 以下のURLをブラウザで開いて、YouTubeチャンネルに権限を与えてください:\n%s\n", authURL)
 
 		// 5. チャネルから認証コードを受け取るまで待機
-		// タイムアウトを設定して、サーバーが永遠に待ち続けないようにする
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
 
@@ -69,8 +77,14 @@ YouTubeチャンネルへのコメント投稿権限を取得するためのOAut
 		select {
 		case code = <-server.CodeChan:
 			// コードを受信
+			server.Stop() // ⭐️ 【修正箇所】サーバー停止をここに移動
+			if code == "" {
+				// エラーハンドラーから空文字列が送られた場合
+				return fmt.Errorf("\n❌ 認証中にエラーが発生しました。詳細はブラウザを確認してください。")
+			}
 		case <-ctx.Done():
 			// タイムアウト
+			server.Stop() // ⭐️ 【修正箇所】タイムアウトの場合もサーバーを停止
 			return fmt.Errorf("\n❌ 認証タイムアウト: 5分以内に認証コードが受信されませんでした。")
 		}
 
@@ -89,4 +103,12 @@ YouTubeチャンネルへのコメント投稿権限を取得するためのOAut
 		fmt.Printf("\n🎉 認証成功！アクセストークンとリフレッシュトークンが '%s' に保存されました。\n", tokenFilePath)
 		return nil
 	},
+}
+
+// init 関数で authCmd の固有フラグを定義します。
+func init() {
+	authCmd.Flags().StringVar(
+		&authFlags.oauthPort, "oauth-port", "8080",
+		"OAuth認証サーバーが待ち受けるポート番号",
+	)
 }
