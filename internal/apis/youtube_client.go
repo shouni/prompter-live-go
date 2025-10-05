@@ -33,7 +33,8 @@ type YouTubeClient struct {
 // NewYouTubeClient は新しい YouTubeClient インスタンスを作成します。
 func NewYouTubeClient(ctx context.Context, channelID string) (*YouTubeClient, error) {
 	// 1. OAuth2 Config とトークンを読み込み
-	config := util.GetOAuth2Config()
+	// 修正: util.GetOAuth2Config に authPort を示す 0 を渡す
+	config := util.GetOAuth2Config(0)
 	token, err := util.LoadToken(util.TokenPath)
 	if err != nil {
 		return nil, fmt.Errorf("トークンファイルのロードに失敗: %w", err)

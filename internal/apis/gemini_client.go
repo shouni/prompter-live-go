@@ -47,8 +47,10 @@ func NewGeminiClient(ctx context.Context, promptFilePath string) (*GeminiClient,
 }
 
 // GenerateResponse は、新しいコメントに基づいて AI の応答を生成します。
-// 応答の生成には、キャラクター設定（promptBase）と、新しいユーザーコメントを使用します。
-func (c *GeminiClient) GenerateResponse(ctx context.Context, newComment, author string) (string, error) {
+// author: コメントを投稿したユーザー名
+// userComment: ユーザーが投稿したコメントの内容
+func (c *GeminiClient) GenerateResponse(ctx context.Context, author, userComment string) (string, error) { // 引数の順序と名前を変更
+
 	// 応答速度とコストのバランスが良いモデルを使用
 	model := c.client.GenerativeModel("gemini-2.5-flash")
 
@@ -58,8 +60,8 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, newComment, author 
 	// システム指示(プロンプトベース)とユーザーのコメントを組み合わせたリクエストを構築
 	fullPrompt := fmt.Sprintf("%s\n\n--- ユーザーのコメント ---\nユーザー名: %s\nコメント: %s\n\n--- AI応答（必ず日本語で記述）---",
 		c.promptBase,
-		author,
-		newComment,
+		author,      // ここは author
+		userComment, // ここは userComment (新しい引数名)
 	)
 
 	// API呼び出しの実行

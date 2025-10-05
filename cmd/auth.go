@@ -2,8 +2,8 @@ package cmd
 
 import (
 	"context"
-	"crypto/rand"     // 追加: ランダムなバイトを生成
-	"encoding/base64" // 追加: バイトをURLセーフな文字列にエンコード
+	"crypto/rand"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"os"
@@ -45,8 +45,8 @@ func generateRandomState() (string, error) {
 func authRunE(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// 1. OAuth2 Config を取得
-	config := util.GetOAuth2Config()
+	// 1. OAuth2 Config を取得 (動的なポート番号を渡すように修正)
+	config := util.GetOAuth2Config(authPort)
 
 	// 2. 認証 URL を生成
 	// CSRF対策のため、セッションごとにユニークなランダムなstateを生成
