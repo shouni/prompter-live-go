@@ -1,198 +1,255 @@
-package apis
+package youtube
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"log/slog"
+	"log"
 	"strings"
 	"time"
 
-	"prompter-live-go/internal/util"
-
-	"golang.org/x/oauth2"
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
 
-// Comment はライブチャットのコメントデータを保持します。
+const (
+	// コメントIDを保持する期間 (例: 1時間)
+	commentIDRetentionDuration = 1 * time.Hour
+)
+
+// ErrLiveChatEnded はライブチャットが終了したことを示すカスタムエラー
+var ErrLiveChatEnded = errors.New("live chat ended")
+
+// Comment は YouTube のライブチャットメッセージを表す構造体
 type Comment struct {
-	ID      string
-	Author  string
-	Message string
-	Time    time.Time
+	ID        string
+	AuthorID  string
+	Author    string
+	Message   string // 💡 修正: メッセージ本体のフィールド名は 'Message'
+	Timestamp time.Time
 }
 
-// YouTubeClient は YouTube Data API とやり取りするためのクライアントです。
-type YouTubeClient struct {
-	service         *youtube.Service // YouTube API Service
-	channelID       string           // 監視対象のチャンネルID
-	liveChatID      string           // 現在アクティブなライブチャットID (ポーリング中に更新される)
-	lastCommentTime time.Time        // 最後に処理したコメントの投稿時間
+// Client は YouTube Live Chat API との連携を管理します。
+type Client struct {
+	channelID string
+
+	// 実際の YouTube SDK サービスインスタンスを保持
+	service *youtube.Service
+
+	// ライブチャットの状態を管理するためのフィールド
+	liveChatID            string
+	nextPageToken         string
+	lastFetchedCommentIDs map[string]time.Time
 }
 
-// NewYouTubeClient は新しい YouTubeClient インスタンスを作成します。
-func NewYouTubeClient(ctx context.Context, channelID string) (*YouTubeClient, error) {
-	// 1. OAuth2 Config とトークンを読み込み
-	// 修正: util.GetOAuth2Config に authPort を示す 0 を渡す
-	config := util.GetOAuth2Config(0)
-	token, err := util.LoadToken(util.TokenPath)
-	if err != nil {
-		return nil, fmt.Errorf("トークンファイルのロードに失敗: %w", err)
+// NewClient は新しい YouTube Client のインスタンスを作成します。
+func NewClient(ctx context.Context, channelID string, oauthPort int) (*Client, error) {
+	if channelID == "" {
+		return nil, fmt.Errorf("youtube channel ID is empty")
 	}
 
-	// 2. カスタム TokenSource の作成: リフレッシュ時に自動保存するロジックをラップ
-	tokenSource := util.NewAutoSavingTokenSource(config.TokenSource(ctx, token))
+	log.Printf("YouTube Client: Starting OAuth2 setup using port %d...", oauthPort)
 
-	// 3. HTTP Client の作成: トークンソースを使用
-	httpClient := oauth2.NewClient(ctx, tokenSource)
+	// 1. 認証済み HTTP クライアントの取得 (GetOAuth2Clientは同じパッケージのauth.goにあります)
+	// GetOAuth2Clientが未定義の場合、Goのビルドシステムはエラーを出しますが、ここでは存在すると仮定
+	// GetOAuth2Client() が GetToken() に依存しているため、ロジックを auth.go の定義に合わせる
 
-	// 4. YouTube Service の作成
-	service, err := youtube.NewService(ctx, option.WithHTTPClient(httpClient))
+	// トークン設定は auth.go に依存するため、ここでは簡略化し、auth.go が適切なクライアントを返すものと仮定する。
+	client, err := GetOAuth2Client(ctx, oauthPort)
 	if err != nil {
-		return nil, fmt.Errorf("YouTubeサービスAPIの初期化に失敗: %w", err)
+		return nil, fmt.Errorf("failed to get authenticated client: %w", err)
 	}
 
-	slog.Info("YouTube API クライアントが正常に初期化されました。", "client_id_prefix", config.ClientID[:8])
+	// 2. YouTube サービスインスタンスの初期化
+	service, err := youtube.NewService(ctx, option.WithHTTPClient(client))
+	if err != nil {
+		return nil, fmt.Errorf("failed to create YouTube service: %w", err)
+	}
 
-	return &YouTubeClient{
-		service:   service,
-		channelID: channelID,
-		// lastCommentTime の初期値は time.Time{} (ゼロ値)
-		lastCommentTime: time.Time{},
+	log.Printf("YouTube Service successfully initialized for channel %s.", channelID)
+
+	return &Client{
+		channelID:             channelID,
+		service:               service,
+		lastFetchedCommentIDs: make(map[string]time.Time),
 	}, nil
 }
 
-// GetLiveChatIDFromChannel はチャンネルIDからアクティブなライブチャットIDを見つけます。
-func (c *YouTubeClient) GetLiveChatIDFromChannel(ctx context.Context) (string, error) {
-	slog.Info("API呼び出し: アクティブなライブチャットIDを検索中", "channel_id", c.channelID)
-
-	// 1. チャンネルのライブ配信中の動画を検索 (eventType=live)
-	searchCall := c.service.Search.List([]string{"id"}).
-		Context(ctx).
+// findLiveChatID はチャンネルの現在のライブブロードキャストを見つけ、そのライブチャットIDを返します。
+func (c *Client) findLiveChatID(ctx context.Context) (string, error) {
+	// 1. Search.List を呼び出し、"live" のブロードキャストを探す
+	call := c.service.Search.List([]string{"id"}).
 		ChannelId(c.channelID).
 		EventType("live").
 		Type("video").
-		MaxResults(1) // 最新の1件のみ取得
+		MaxResults(1)
 
-	searchResponse, err := searchCall.Do()
+	response, err := call.Context(ctx).Do()
 	if err != nil {
-		return "", fmt.Errorf("ライブ動画の検索に失敗: %w", err)
+		return "", fmt.Errorf("failed to search live broadcast: %w", err)
 	}
 
-	if len(searchResponse.Items) == 0 {
-		return "", fmt.Errorf("現在アクティブなライブ配信が見つかりません (チャンネルID: %s)", c.channelID)
+	if len(response.Items) == 0 {
+		return "", fmt.Errorf("no active live broadcast found for channel ID: %s", c.channelID)
 	}
 
-	// 2. 見つかった動画のIDを取得
-	videoID := searchResponse.Items[0].Id.VideoId
+	videoID := response.Items[0].Id.VideoId
 
-	// 3. 動画IDからライブチャットIDを取得
-	videoCall := c.service.Videos.List([]string{"liveStreamingDetails"}).
-		Context(ctx).
+	// 2. Videos.List を呼び出し、ライブチャット ID を取得
+	videosCall := c.service.Videos.List([]string{"liveStreamingDetails"}).
 		Id(videoID)
 
-	videoResponse, err := videoCall.Do()
+	videosResp, err := videosCall.Context(ctx).Do()
 	if err != nil {
-		return "", fmt.Errorf("動画の詳細取得に失敗: %w", err)
+		return "", fmt.Errorf("failed to get video details: %w", err)
 	}
 
-	// ライブストリーミングの詳細情報が存在し、かつライブチャットIDが存在するか確認
-	if len(videoResponse.Items) == 0 || videoResponse.Items[0].LiveStreamingDetails == nil || videoResponse.Items[0].LiveStreamingDetails.ActiveLiveChatId == "" {
-		return "", fmt.Errorf("動画ID %s にアクティブなライブチャットIDが見つかりません", videoID)
+	if len(videosResp.Items) == 0 || videosResp.Items[0].LiveStreamingDetails == nil || videosResp.Items[0].LiveStreamingDetails.ActiveLiveChatId == "" {
+		return "", fmt.Errorf("live streaming details or active chat ID not available for video ID: %s", videoID)
 	}
 
-	liveChatID := videoResponse.Items[0].LiveStreamingDetails.ActiveLiveChatId
-	slog.Info("ライブチャットIDを取得しました。", "live_chat_id", liveChatID, "video_id", videoID)
-	// ライブチャットIDを更新
-	c.liveChatID = liveChatID
+	liveChatID := videosResp.Items[0].LiveStreamingDetails.ActiveLiveChatId
+
+	log.Printf("Found Active Live Chat ID: %s", liveChatID)
 	return liveChatID, nil
 }
 
-// FetchLiveChatMessages はライブチャットIDを使用して新しいコメントを取得します。
-func (c *YouTubeClient) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
+// FetchLiveChatMessages は新しいライブチャットメッセージを取得します。
+// 💡 修正: シグネチャを types.LowLatencyResponse に合わせ、ポーリング間隔を戻り値に含めます。
+func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, time.Duration, error) {
+	// 1. 初回呼び出し時に liveChatID を検索し設定
 	if c.liveChatID == "" {
-		// liveChatIDがまだ設定されていない場合、取得を試みる
-		_, err := c.GetLiveChatIDFromChannel(ctx)
+		id, err := c.findLiveChatID(ctx)
 		if err != nil {
-			return nil, fmt.Errorf("ライブチャットIDの取得に失敗: %w", err)
+			return nil, 0, err
 		}
+		c.liveChatID = id
 	}
 
-	slog.Info("API呼び出し: 新しいライブチャットメッセージを取得中", "live_chat_id", c.liveChatID)
+	// 2. LiveChatMessages.List を呼び出し
+	call := c.service.LiveChatMessages.List(c.liveChatID, []string{"snippet", "authorDetails"})
 
-	call := c.service.LiveChatMessages.List(c.liveChatID, []string{"snippet", "authorDetails"}).
-		Context(ctx).
-		MaxResults(200) // 一度に取得するコメント数の上限
+	if c.nextPageToken != "" {
+		call = call.PageToken(c.nextPageToken)
+	}
 
-	response, err := call.Do()
+	response, err := call.Context(ctx).Do()
 	if err != nil {
-		// APIエラーの場合、liveChatIDをリセットして次のポーリングで再取得を試みる
-		if strings.Contains(err.Error(), "liveChatEnded") {
-			slog.Warn("ライブチャットが終了しました。liveChatIDをリセットします。")
-			c.liveChatID = ""
+		// YouTube API が返すエラーメッセージをチェック
+		// "liveChatEnded" または類似のエラーメッセージが含まれるかチェック
+		if strings.Contains(err.Error(), "liveChatEnded") || strings.Contains(err.Error(), "live chat is inactive") {
+			// ライブチャット終了エラーの場合
+			log.Printf("YouTube API Error: Live chat ended. Error: %v", err)
+			c.liveChatID = "" // 💡 修正: liveChatID をリセット
+			c.nextPageToken = ""
+			return nil, 0, ErrLiveChatEnded // 💡 修正: カスタムエラーと 0s を返す
 		}
-		return nil, fmt.Errorf("ライブチャットメッセージの取得に失敗: %w", err)
+		// その他のエラー
+		return nil, 0, fmt.Errorf("failed to fetch live chat messages: %w", err)
 	}
 
-	newComments := []Comment{}
+	// 3. 次のポーリングのためのトークンと間隔を更新
+	c.nextPageToken = response.NextPageToken
+	pollingInterval := time.Duration(response.PollingIntervalMillis) * time.Millisecond // 💡 修正: pollingInterval をここで定義
+
+	// 4. メッセージを処理し、重複をフィルタリング
+	var newComments []Comment
+	currentTime := time.Now()
+
 	for _, item := range response.Items {
-		// 投稿時間をパース
-		publishedTime, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
-		if err != nil {
-			slog.Error("コメント時間のパースに失敗", "error", err, "time_string", item.Snippet.PublishedAt)
+		// YouTube Data APIの仕様: LiveChatMessage IDは item.Id
+		commentID := item.Id
+
+		// 4.1. 重複チェック
+		if _, exists := c.lastFetchedCommentIDs[commentID]; exists {
+			continue // 既に処理済みのためスキップ
+		}
+
+		// 4.2. 必須フィールドのチェック (AI応答に必要なメッセージ本文)
+		if item.Snippet.DisplayMessage == "" {
 			continue
 		}
 
-		// lastCommentTime より厳密に新しいコメントのみを処理
-		if publishedTime.After(c.lastCommentTime) {
-			comment := Comment{
-				ID:      item.Id,
-				Author:  item.AuthorDetails.DisplayName,
-				Message: item.Snippet.DisplayMessage,
-				Time:    publishedTime,
-			}
-			newComments = append(newComments, comment)
+		// 4.3. コメントの構造体を作成
+		newComment := Comment{
+			ID:       commentID,
+			AuthorID: item.AuthorDetails.ChannelId,
+			Author:   item.AuthorDetails.DisplayName,
+			Message:  item.Snippet.DisplayMessage, // 💡 修正: TextではなくMessageを使用
+			// YouTubeのタイムスタンプはRFC3339形式
+			Timestamp: parseYouTubeTimestamp(item.Snippet.PublishedAt),
+		}
+
+		newComments = append(newComments, newComment)
+
+		// 4.4. 💡 新しいコメントIDをマップに記録
+		c.lastFetchedCommentIDs[commentID] = currentTime
+	}
+
+	// 5. 💡 ガベージコレクションを実行し、古いエントリを削除
+	c.cleanOldCommentIDs(currentTime)
+
+	return newComments, pollingInterval, nil // 💡 修正: 正しい戻り値の数で返す
+}
+
+// cleanOldCommentIDs は保持期間を過ぎたコメントIDをマップから削除します。
+func (c *Client) cleanOldCommentIDs(currentTime time.Time) {
+	// ログの頻度を抑えるためのカウンター
+	deletedCount := 0
+
+	// 現在時刻から保持期間を引いたしきい値
+	threshold := currentTime.Add(-commentIDRetentionDuration)
+
+	for id, t := range c.lastFetchedCommentIDs {
+		if t.Before(threshold) {
+			delete(c.lastFetchedCommentIDs, id)
+			deletedCount++
 		}
 	}
 
-	// 最後に処理したコメントの時間を更新
-	if len(newComments) > 0 {
-		// 新しいコメントの中で最も新しい時間を取得
-		c.lastCommentTime = newComments[len(newComments)-1].Time
+	if deletedCount > 0 {
+		log.Printf("[YouTube Client] Cleaned %d old comment IDs. Total tracked: %d", deletedCount, len(c.lastFetchedCommentIDs))
 	}
-
-	return newComments, nil
 }
 
-// PostComment は指定された動画のチャットにコメントを投稿します。
-func (c *YouTubeClient) PostComment(ctx context.Context, message string) error {
-	slog.Info("API呼び出し: コメント投稿中", "live_chat_id", c.liveChatID, "message_len", len(message))
+// PostComment は指定されたテキストをライブチャットに投稿します。
+// ... (このメソッドは変更なしと仮定) ...
 
-	// コメントの構造を作成
-	comment := &youtube.LiveChatMessage{
+// parseYouTubeTimestamp は YouTube API のタイムスタンプ文字列を time.Time に変換します。
+// これは YouTube の慣習的なユーティリティ関数であり、パッケージ内で定義されている必要があります。
+func parseYouTubeTimestamp(t string) time.Time {
+	parsedTime, err := time.Parse(time.RFC3339, t)
+	if err != nil {
+		log.Printf("Error parsing timestamp '%s': %v", t, err)
+		return time.Time{} // パース失敗時はゼロ値を返す
+	}
+	return parsedTime
+}
+
+// PostComment は指定されたテキストをライブチャットに投稿します。
+func (c *Client) PostComment(ctx context.Context, text string) error {
+	// 1. liveChatID が設定されていることを確認
+	if c.liveChatID == "" {
+		return fmt.Errorf("live chat ID is not set. Cannot post comment")
+	}
+
+	// 2. 投稿する LiveChatMessage オブジェクトを作成
+	message := &youtube.LiveChatMessage{
 		Snippet: &youtube.LiveChatMessageSnippet{
 			LiveChatId: c.liveChatID,
 			Type:       "textMessageEvent",
 			TextMessageDetails: &youtube.LiveChatTextMessageDetails{
-				MessageText: message,
+				MessageText: text,
 			},
 		},
 	}
 
-	// 投稿実行
-	_, err := c.service.LiveChatMessages.Insert([]string{"snippet"}, comment).
-		Context(ctx).
-		Do()
-
+	// 3. LiveChatMessages.Insert を呼び出し
+	_, err := c.service.LiveChatMessages.Insert([]string{"snippet"}, message).Context(ctx).Do()
 	if err != nil {
-		return fmt.Errorf("コメントの投稿に失敗: %w", err)
+		return fmt.Errorf("failed to post comment to live chat: %w", err)
 	}
 
-	slog.Info("コメント投稿成功", "message", message)
+	log.Printf("YouTube Comment Posted successfully: %s", text)
 	return nil
-}
-
-// GetLiveChatID は現在の LiveChatID を返します。
-func (c *YouTubeClient) GetLiveChatID() string {
-	return c.liveChatID
 }

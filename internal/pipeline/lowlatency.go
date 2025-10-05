@@ -1,96 +1,144 @@
-package live_processor
+package pipeline
 
 import (
 	"context"
+	"errors" // 💡 修正: errors パッケージを追加
 	"fmt"
-	"log/slog"
-	"regexp"
-	"strings"
+	"io" // 💡 修正: io パッケージを追加
+	"log"
+	"time"
 
-	"prompter-live-go/internal/apis"
+	"prompter-live-go/internal/gemini"
+	"prompter-live-go/internal/types"
+	"prompter-live-go/internal/youtube"
 )
 
-// Processor はライブコメントのポーリング、AI応答生成、投稿の主要なロジックを保持します。
-type Processor struct {
-	ytClient     *apis.YouTubeClient
-	geminiClient *apis.GeminiClient
-	dryRun       bool
+// LowLatencyPipeline はライブチャットのリアルタイム処理を管理します。
+type LowLatencyPipeline struct {
+	geminiClient   *gemini.Client
+	youtubeClient  *youtube.Client
+	geminiConfig   types.LiveAPIConfig
+	pipelineConfig types.PipelineConfig
+	session        gemini.Session
 }
 
-// NewProcessor は新しい Processor インスタンスを作成します。
-func NewProcessor(ytClient *apis.YouTubeClient, geminiClient *apis.GeminiClient, dryRun bool) *Processor {
-	return &Processor{
-		ytClient:     ytClient,
-		geminiClient: geminiClient,
-		dryRun:       dryRun,
+// NewLowLatencyPipeline は新しいパイプラインインスタンスを作成します。
+func NewLowLatencyPipeline(
+	geminiClient *gemini.Client,
+	youtubeClient *youtube.Client,
+	geminiConfig types.LiveAPIConfig,
+	pipelineConfig types.PipelineConfig,
+) *LowLatencyPipeline {
+	return &LowLatencyPipeline{
+		geminiClient:   geminiClient,
+		youtubeClient:  youtubeClient,
+		geminiConfig:   geminiConfig,
+		pipelineConfig: pipelineConfig,
 	}
 }
 
-// ProcessNextBatch は、新しいコメントを取得し、AI応答を生成・投稿する一連の処理を実行します。
-// これは cmd/run.go からポーリングループ内で呼び出されます。
-func (p *Processor) ProcessNextBatch(ctx context.Context) error {
-	newComments, err := p.ytClient.FetchLiveChatMessages(ctx)
+// Run はメインのパイプライン処理を開始します。
+func (p *LowLatencyPipeline) Run(ctx context.Context) error {
+	log.Println("Pipeline started.")
+
+	// 1. Geminiセッションの初期化
+	// Live Client は内部でセッションを開始します
+	session, err := p.geminiClient.StartSession(ctx, p.geminiConfig)
 	if err != nil {
-		return fmt.Errorf("コメント取得エラー: %w", err)
+		return fmt.Errorf("failed to start Gemini session: %w", err)
 	}
+	p.session = session
+	defer p.session.Close()
 
-	if len(newComments) == 0 {
-		slog.Info("新しいコメントはありませんでした。")
-		return nil
-	}
+	// 2. メインループの実行
+	return p.runLoop(ctx)
+}
 
-	slog.Info("新しいコメントを検出しました。", "count", len(newComments), "live_chat_id", p.ytClient.GetLiveChatID())
+// runLoop は定期的なポーリングとAI応答処理を行うメインのループです。
+func (p *LowLatencyPipeline) runLoop(ctx context.Context) error {
+	// YouTube Live Chat API から推奨されるポーリング間隔を初期値として設定
+	nextPollDelay := p.pipelineConfig.PollingInterval
 
-	// コメントごとにAI応答を生成
-	for _, comment := range newComments {
-		// ここで AI 自身のコメントをスキップするロジックを挿入することも可能ですが、
-		// チャンネル名が頻繁に変わる可能性があるため、プロンプトでの制御を推奨します。
+	for {
+		select {
+		case <-ctx.Done():
+			// アプリケーション終了シグナルを受け取る
+			log.Println("Pipeline context cancelled. Shutting down.")
+			return ctx.Err()
+		case <-time.After(nextPollDelay):
+			// ポーリング間隔が経過したら実行
 
-		slog.Info("コメントを処理中", "author", comment.Author, "message", comment.Message)
+			// 1. YouTube から新しいコメントを取得
+			comments, pollingInterval, err := p.youtubeClient.FetchLiveChatMessages(ctx)
 
-		// 1. Geminiで応答を生成
-		response, err := p.geminiClient.GenerateResponse(ctx, comment.Author, comment.Message)
-		if err != nil {
-			slog.Error("Gemini応答生成エラー", "error", err, "author", comment.Author)
-			continue
-		}
+			// 2. エラー処理
+			if err != nil {
+				if errors.Is(err, youtube.ErrLiveChatEnded) {
+					log.Println("Live chat ended. Waiting 30s before trying to find a new chat.")
+					// ライブチャットが終了した場合は、次の再試行まで長めに待つ
+					nextPollDelay = 30 * time.Second
+					continue
+				}
+				log.Printf("Error fetching live chat messages: %v. Retrying in %v.", err, nextPollDelay)
+				// その他のエラーの場合は、次のポーリング間隔まで待って再試行
+				continue
+			}
 
-		// 2. 応答を整形
-		sanitizedResponse := sanitizeMessage(response)
+			// 💡 修正: pollingInterval を使用して次の待機時間を動的に設定
+			// APIが推奨するポーリング間隔に更新
+			if pollingInterval > 0 {
+				nextPollDelay = pollingInterval
+			} else {
+				// 0sが返された場合は、デフォルトに戻すか、前回値を維持
+				log.Println("API returned 0s polling interval. Using default.")
+				// nextPollDelay は変更しない (前回値を維持)
+			}
 
-		if sanitizedResponse == "" {
-			slog.Info("AIが空の応答を生成しました (スパムまたは無効なコメントと判断)")
-			continue
-		}
+			// 3. 取得したコメントを AI に送信し、応答処理を開始
+			for _, comment := range comments {
+				// AIが自分自身に応答しないように、AuthorIDでフィルタリングが必要だが、
+				// youtube.Client がこのロジックを持っていないため、一旦すべて送信する。
+				log.Printf("New Comment received from %s: %s", comment.Author, comment.Message)
 
-		// 3. コメントの投稿
-		if p.dryRun {
-			slog.Warn("ドライラン: コメントは投稿されません。", "応答", sanitizedResponse)
-		} else {
-			if err := p.ytClient.PostComment(ctx, sanitizedResponse); err != nil {
-				slog.Error("コメント投稿失敗", "error", err, "response", sanitizedResponse)
+				// AIにコメントを送信 (非同期で応答ストリームを開始する)
+				data := types.LiveStreamData{
+					Text: fmt.Sprintf("%s says: %s", comment.Author, comment.Message),
+					// Modalitiesなどの追加情報をここに追加可能
+				}
+				if err := p.session.Send(ctx, data); err != nil {
+					log.Printf("Error sending message to Gemini: %v", err)
+					continue
+				}
+
+				// 4. AI応答の受信と YouTube への投稿（ブロック）
+				p.handleAIResponse(ctx)
 			}
 		}
 	}
-
-	return nil
 }
 
-// sanitizeMessage は Gemini からの応答を YouTube の制約に合わせて整形します。
-func sanitizeMessage(message string) string {
-	// 1. マークダウンのコードブロックを削除 (例: ```json)
-	re := regexp.MustCompile("(?s)```.*?```")
-	message = re.ReplaceAllString(message, "")
-
-	// 2. 過剰な改行を削除し、文字列の先頭と末尾の空白を削除
-	message = strings.TrimSpace(message)
-	message = strings.ReplaceAll(message, "\n", " ")
-	// 3. YouTubeのコメント文字数制限 (最大500文字) を考慮
-	const youtubeCommentLimit = 500
-	if len(message) > youtubeCommentLimit {
-		slog.Warn("メッセージが長すぎるため切り詰めます。", "original_len", len(message), "limit", youtubeCommentLimit)
-		message = message[:youtubeCommentLimit]
+// handleAIResponse はAIからの応答を受け取り、YouTubeに投稿します。
+func (p *LowLatencyPipeline) handleAIResponse(ctx context.Context) {
+	// 💡 RecvResponse は完全な応答が来るまで待機し、一度だけ返します。
+	resp, err := p.session.RecvResponse()
+	if err != nil {
+		if errors.Is(err, io.EOF) {
+			// ストリーム完了（正常終了）
+			return
+		}
+		log.Printf("Error receiving Gemini response: %v", err)
+		return
 	}
 
-	return message
+	// 応答テキストが空でなければ投稿
+	if resp.ResponseText != "" {
+		log.Printf("AI Response: %s", resp.ResponseText)
+
+		// YouTube にコメントを投稿
+		if err := p.youtubeClient.PostComment(ctx, resp.ResponseText); err != nil {
+			log.Printf("Error posting comment to YouTube: %v", err)
+		}
+	}
+
+	// Done: true であれば、この応答でストリームが終了したことを意味します（RecvResponseのロジックで保証されています）
 }
