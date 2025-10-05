@@ -1,4 +1,4 @@
-package apis
+package youtube
 
 import (
 	"context"
@@ -22,16 +22,16 @@ type Comment struct {
 	Time    time.Time
 }
 
-// YouTubeClient は YouTube Data API とやり取りするためのクライアントです。
-type YouTubeClient struct {
+// Client は YouTube Data API とやり取りするためのクライアントです。
+type Client struct {
 	service         *youtube.Service // YouTube API Service
 	channelID       string           // 監視対象のチャンネルID
 	liveChatID      string           // 現在アクティブなライブチャットID (ポーリング中に更新される)
 	lastCommentTime time.Time        // 最後に処理したコメントの投稿時間
 }
 
-// NewYouTubeClient は新しい YouTubeClient インスタンスを作成します。
-func NewYouTubeClient(ctx context.Context, channelID string) (*YouTubeClient, error) {
+// NewClient は新しい YouTubeClient インスタンスを作成します。
+func NewClient(ctx context.Context, channelID string) (*Client, error) { // 関数名と戻り値の型を修正
 	// 1. OAuth2 Config とトークンを読み込み
 	// 修正: util.GetOAuth2Config に authPort を示す 0 を渡す
 	config := util.GetOAuth2Config(0)
@@ -54,7 +54,7 @@ func NewYouTubeClient(ctx context.Context, channelID string) (*YouTubeClient, er
 
 	slog.Info("YouTube API クライアントが正常に初期化されました。", "client_id_prefix", config.ClientID[:8])
 
-	return &YouTubeClient{
+	return &Client{
 		service:   service,
 		channelID: channelID,
 		// lastCommentTime の初期値は time.Time{} (ゼロ値)
@@ -63,7 +63,7 @@ func NewYouTubeClient(ctx context.Context, channelID string) (*YouTubeClient, er
 }
 
 // GetLiveChatIDFromChannel はチャンネルIDからアクティブなライブチャットIDを見つけます。
-func (c *YouTubeClient) GetLiveChatIDFromChannel(ctx context.Context) (string, error) {
+func (c *Client) GetLiveChatIDFromChannel(ctx context.Context) (string, error) {
 	slog.Info("API呼び出し: アクティブなライブチャットIDを検索中", "channel_id", c.channelID)
 
 	// 1. チャンネルのライブ配信中の動画を検索 (eventType=live)
@@ -109,7 +109,7 @@ func (c *YouTubeClient) GetLiveChatIDFromChannel(ctx context.Context) (string, e
 }
 
 // FetchLiveChatMessages はライブチャットIDを使用して新しいコメントを取得します。
-func (c *YouTubeClient) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
+func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
 	if c.liveChatID == "" {
 		// liveChatIDがまだ設定されていない場合、取得を試みる
 		_, err := c.GetLiveChatIDFromChannel(ctx)
@@ -165,7 +165,7 @@ func (c *YouTubeClient) FetchLiveChatMessages(ctx context.Context) ([]Comment, e
 }
 
 // PostComment は指定された動画のチャットにコメントを投稿します。
-func (c *YouTubeClient) PostComment(ctx context.Context, message string) error {
+func (c *Client) PostComment(ctx context.Context, message string) error {
 	slog.Info("API呼び出し: コメント投稿中", "live_chat_id", c.liveChatID, "message_len", len(message))
 
 	// コメントの構造を作成
@@ -193,6 +193,6 @@ func (c *YouTubeClient) PostComment(ctx context.Context, message string) error {
 }
 
 // GetLiveChatID は現在の LiveChatID を返します。
-func (c *YouTubeClient) GetLiveChatID() string {
+func (c *Client) GetLiveChatID() string { // ここを修正
 	return c.liveChatID
 }
