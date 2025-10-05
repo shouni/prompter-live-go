@@ -36,3 +36,4 @@ gemini_reviewer	prompter_live
 /var/
 /.env
 /workspace.xml
+/config/token.json
