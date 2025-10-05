@@ -39,11 +39,7 @@
 
 ## 🛠️ 事前準備と環境設定
 
-### 1\. Go のインストール
-
-本ツールは Go言語で開発されています。Goが未インストールの場合は、[公式ドキュメント](https://go.dev/doc/install) を参照し、環境に合わせたインストールを行ってください。
-
-### 2\. プロジェクトのセットアップとビルド
+### 1\. Go のインストールとビルド
 
 ```bash
 # リポジトリをクローン
@@ -52,45 +48,44 @@ cd prompter-live-go
 
 # 実行ファイルを bin/ ディレクトリに生成
 go build -o bin/prompter_live
-```
+````
 
-実行ファイルは、プロジェクトルートの `./bin/prompter_live` に生成されます。
+### 2\. 環境変数の設定 (必須)
 
------
-
-### 3\. 環境変数の設定 (必須)
-
-Gemini API および YouTube API 連携に必要な認証情報を環境変数に設定します。
+Goアプリケーションは、以下の変数名で認証情報を読み込みます。
 
 #### macOS / Linux (bash/zsh)
 
 ```bash
-# Gemini API キー (必須)
+# 💡 注意: YouTube のクライアントID/シークレットは 'YT_' で始まります
 export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-
-# YouTube API 連携に必要な OAuth クライアント情報 (必須)
-export YOUTUBE_CLIENT_ID="YOUR_GCP_CLIENT_ID"
-export YOUTUBE_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
+export YT_CLIENT_ID="YOUR_GCP_CLIENT_ID"
+export YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 ```
 
 #### Windows (PowerShell)
 
 ```powershell
-# Gemini API キー (必須)
+# 💡 注意: YouTube のクライアントID/シークレットは 'YT_' で始まります
 $env:GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
-
-# YouTube API 連携に必要な OAuth クライアント情報 (必須)
-$env:YOUTUBE_CLIENT_ID="YOUR_GCP_CLIENT_ID"
-$env:YOUTUBE_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
+$env:YT_CLIENT_ID="YOUR_GCP_CLIENT_ID"
+$env:YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 ```
 
-> **Note:** YouTube へのコメントポスト機能を利用するには、**OAuth 2.0 認証フロー**を先に実行する必要があります（後述の `auth` コマンドを使用）。
+### 3\. Google Cloud Platform (GCP) の設定 (重要)
 
------
+本ツールを実行するには、GCPプロジェクトで以下の設定が完了している必要があります。
+
+1.  **YouTube Data API v3 の有効化**:
+    - GCPコンソールで、使用するプロジェクトの **「YouTube Data API v3」** を有効化してください。これが無効だと `Error 403: SERVICE_DISABLED` が発生します。
+2.  **OAuth リダイレクト URI の登録**:
+    - OAuth 2.0 クライアント ID（ウェブ アプリケーション）の設定で、以下のコールバック URI を**承認済みリダイレクト URI** に追加してください。
+        - `http://localhost:8080/callback`
+        - `http://localhost:8081/callback` (ポート競合時の予備)
 
 ### 4\. プロンプトファイルの準備
 
-本ツールの応答の核となるキャラクター設定と応答ルールは、外部のMarkdownファイルに記述します。
+応答の核となるキャラクター設定と応答ルールをMarkdownファイルに記述します。
 
 ```
 prompter-live-go/
@@ -104,12 +99,19 @@ prompter-live-go/
 
 ### 1\. 認証コマンド (`auth`) 🔒
 
-本ツールを最初に実行する際、YouTube APIにアクセスするための**OAuth 2.0 認証**を行う必要があります。このプロセスにより、アクセストークンファイルがローカルに保存されます。
+本ツールを最初に実行する際、YouTubeへのコメント投稿権限を得るための**OAuth 2.0 認証**を行います。
+
+認証に失敗する場合、`--oauth-port` フラグを使用して、空いているポートに変更できます（例: 8082）。
 
 ```bash
-# 認証サーバーを起動し、ブラウザでログインプロセスを開始
+# 標準ポートで認証を開始
 ./bin/prompter_live auth
+
+# ポート競合が発生した場合 (推奨: 8082など空きポートを使用)
+./bin/prompter_live auth --oauth-port 8082
 ```
+
+> **Note:** 認証成功後、プロジェクトルートに `config/token.json` ファイルが生成されます。
 
 ### 2\. 自動応答開始コマンド (`run`) 🤖
 
@@ -132,15 +134,14 @@ prompter-live-go/
 | `--prompt-file` | キャラクター設定と応答指示が書かれたプロンプトファイルのパス | **なし (必須)** |
 | `--dry-run` | 実際のコメント投稿をスキップし、応答結果を標準出力する（テスト用） | `false` |
 
+> **重要**: `run` コマンドは、指定されたチャンネルが**現在アクティブなライブ配信を行っている場合のみ**コメントのポーリングを開始できます。ライブ中でない場合、`videoNotFound` エラーが発生します。
+
 -----
 
 ### ⚠️ 動作原理に関する重要な注意点
 
-本ツールは、YouTube Data API の仕様に基づき、以下の方法で動作します。
-
-1.  **ポーリング（定期取得）を採用**: YouTube API は、Slack や GitHub のようなリアルタイムな Webhook（プッシュ通知）を提供していません。そのため、本ツールは指定された間隔（`--polling-interval`）で API へ問い合わせを行う「**ポーリング**」方式を採用しています。
-2.  **API クォータの消費**: ポーリングのたびに YouTube API のクォータ（利用制限）を消費します。頻度を高く設定しすぎると、クォータを使い切る可能性があるため、適切な間隔を設定してください。
-3.  **OAuth認証が必須**: コメントの投稿には、チャンネル所有者としての権限が必要なため、必ず `auth` コマンドで OAuth 2.0 認証を完了させてください。
+* **ポーリング（定期取得）を採用**: YouTube API の仕様により、本ツールは指定された間隔（`--polling-interval`）で API へ問い合わせを行う「**ポーリング**」方式を採用しています。
+* **API クォータの消費**: ポーリングのたびに YouTube API のクォータ（利用制限）を消費します。頻度を高く設定しすぎると、クォータを使い切る可能性があるため、適切な間隔を設定してください。
 
 -----
 
