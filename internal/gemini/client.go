@@ -53,16 +53,13 @@ func (c *Client) StartSession(ctx context.Context, config types.LiveAPIConfig) (
 	// 1. モデルを取得。
 	model := c.baseClient.GenerativeModel(c.modelName)
 
-	// 2. システム指示の設定ロジックは newGeminiLiveSession に移譲されたため、
-	// ここではモデルの設定を省略し、単にモデルと設定、システム指示を渡します。
-
-	// 3. 内部セッション (newGeminiLiveSession) を作成
-	// 💡 修正: c.systemInstruction を第3引数として渡す
+	// 2. 内部セッション (newGeminiLiveSession) を作成
+	// c.systemInstruction を第3引数として渡し、ペルソナを適用
 	session := newGeminiLiveSession(model, config, c.systemInstruction)
 
 	log.Printf("New Gemini Session started for model: %s", c.modelName)
 
-	// 4. Sessionインターフェースとして返す
+	// 3. Sessionインターフェースとして返す
 	return session, nil
 }
 
