@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sync"
 
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
@@ -16,6 +17,43 @@ import (
 // TokenPath はOAuth2トークンを保存するファイルのパスです。
 // プロジェクトルートからの相対パスを指定します。
 const TokenPath = "config/token.json"
+
+// AutoSavingTokenSource は TokenSource をラップし、
+// トークンがリフレッシュされるたびにファイルに保存する役割を果たします。
+type AutoSavingTokenSource struct {
+	oauth2.TokenSource
+	mu sync.Mutex // スレッドセーフのためのロック
+}
+
+// NewAutoSavingTokenSource は、既存の TokenSource をラップします。
+func NewAutoSavingTokenSource(ts oauth2.TokenSource) oauth2.TokenSource {
+	return &AutoSavingTokenSource{
+		TokenSource: ts,
+	}
+}
+
+// Token は新しいトークンを取得します。TokenSource がリフレッシュを実行した場合、
+// 新しいトークンをファイルに保存します。
+func (ts *AutoSavingTokenSource) Token() (*oauth2.Token, error) {
+	token, err := ts.TokenSource.Token()
+	if err != nil {
+		return nil, err
+	}
+
+	// トークンが有効な場合、新しいトークンがリフレッシュされた可能性があるため、保存を試みる。
+	// RefreshToken が設定されている、またはトークン自体が更新されている場合は保存される。
+	if token.Valid() && token.RefreshToken != "" {
+		ts.mu.Lock()
+		defer ts.mu.Unlock()
+		// バックグラウンドでエラーを無視して保存。これにより、毎回リフレッシュされた最新のトークンが永続化されます。
+		if err := SaveToken(TokenPath, token); err != nil {
+			// 致命的なエラーではないため、ログに記録するのみ
+			fmt.Fprintf(os.Stderr, "⚠️ 自動トークン保存に失敗: %v\n", err)
+		}
+	}
+
+	return token, nil
+}
 
 // LoadToken はローカルファイルから認証トークンを読み込みます。
 func LoadToken(path string) (*oauth2.Token, error) {
