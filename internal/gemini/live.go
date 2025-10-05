@@ -3,10 +3,14 @@ package gemini
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
-	"time"
 
 	"prompter-live-go/internal/types"
+
+	"google.golang.org/api/option"
+
+	"github.com/google/generative-ai-go/genai"
 )
 
 // LiveSession はパイプラインが利用する、Gemini Liveセッションのインターフェースです。
@@ -18,61 +22,172 @@ type LiveSession interface {
 
 // LiveClient は Gemini Live API への接続を管理するためのクライアント構造体です。
 type LiveClient struct {
-	// 実際のSDKクライアントの認証情報を保持
-	apiKey string
-	// TODO: ここに実際の Gemini SDK クライアントインスタンスを保持します
+	client *genai.Client
 }
 
-// --- SDK型をラップする構造体とインターフェースの定義 ---
+// --- LiveSession の具体的な実装 (GenerateContentStream ベース) ---
 
-// sdkLiveStream は、SDKのConnect呼び出しが返す生のセッションオブジェクトのインターフェースです。
-type sdkLiveStream interface {
-	// 💡 TODO: SDK の Send メソッドのシグネチャに置き換える必要があります。
-	SDKSend(data interface{}) error
+// geminiLiveSession は LiveSession インターフェースを満たします。
+type geminiLiveSession struct {
+	model *genai.GenerativeModel
 
-	// 💡 TODO: SDK の Recv メソッドのシグネチャに置き換える必要があります。
-	SDKRecv() (interface{}, error)
-	Close() error
+	// 💡 修正: ストリームからチャンクを非同期で受け取るためのチャネル
+	streamChan chan *genai.GenerateContentResponse
+
+	// 💡 修正: ストリーム終了を通知するためのチャネル
+	doneChan chan error
+
+	// 履歴をContent配列として保持
+	history []*genai.Content
+
+	// 応答の再構築用バッファ
+	currentResponse *genai.Content
 }
 
-// liveSessionWrapper は sdkLiveStream をラップし、LiveSession インターフェースを満たします。
-type liveSessionWrapper struct {
-	session sdkLiveStream
-}
+// newGeminiLiveSession は新しいセッションを作成します。
+func newGeminiLiveSession(client *genai.Client, config types.LiveAPIConfig) *geminiLiveSession {
+	model := client.GenerativeModel(config.Model)
 
-// Send はパイプラインの型をSDKが要求するペイロードに変換して送信します。
-func (w *liveSessionWrapper) Send(data types.LiveStreamData) error {
-	log.Printf("LiveSession: Sending input data (MimeType: %s, Data length: %d)", data.MimeType, len(data.Data))
-
-	// 💡 TODO: ここに実際の SDK 呼び出しロジックを実装
-	// 1. data を SDK が要求するペイロード型に変換
-	// 2. w.session.SDKSend(convertedPayload) を呼び出す
-	return w.session.SDKSend(data)
-}
-
-// RecvResponse はSDKからの応答をパイプラインの型に変換して返します。
-func (w *liveSessionWrapper) RecvResponse() (*types.LowLatencyResponse, error) {
-	// 💡 修正: 未使用の rawResp を破棄変数 (_) に変更し、エラーをチェック
-	_, err := w.session.SDKRecv()
-	if err != nil {
-		return nil, err
+	if config.SystemInstruction != "" {
+		content := &genai.Content{
+			Parts: []genai.Part{genai.Text(config.SystemInstruction)},
+		}
+		model.SystemInstruction = content
 	}
 
-	// 💡 TODO: ここに実際の SDK 応答の解析ロジックを実装
+	return &geminiLiveSession{
+		model:           model,
+		history:         []*genai.Content{},
+		currentResponse: &genai.Content{Role: "model", Parts: []genai.Part{}},
+	}
+}
 
-	// MOCK: 解析結果をシミュレーション
-	time.Sleep(50 * time.Millisecond) // 遅延をシミュレート
+// Send はメッセージをモデルに送信し、ストリーミングを開始します。
+func (s *geminiLiveSession) Send(data types.LiveStreamData) error {
+	log.Printf("LiveSession: Sending input data (MimeType: %s, Data length: %d)", data.MimeType, len(data.Data))
 
-	return &types.LowLatencyResponse{
-		Text: "AIが生成したテキスト（MOCK）",
-		Done: false,
-	}, nil
+	// 既存のチャネルがあればクローズ
+	s.Close()
+	s.currentResponse = &genai.Content{Role: "model", Parts: []genai.Part{}}
+
+	var part genai.Part
+	if data.MimeType == "text/plain" {
+		part = genai.Text(string(data.Data))
+	} else {
+		part = &genai.Blob{
+			MIMEType: data.MimeType,
+			Data:     data.Data,
+		}
+	}
+
+	userInput := &genai.Content{
+		Role:  "user",
+		Parts: []genai.Part{part},
+	}
+
+	// 履歴と新しい入力を組み合わせ
+	contents := append(s.history, userInput) // Line 92: contents は履歴コミットに使われるため、未使用エラー解消
+
+	// 新しいチャネルを作成し、ストリーム処理を開始
+	s.streamChan = make(chan *genai.GenerateContentResponse)
+	s.doneChan = make(chan error, 1) // バッファサイズ1
+
+	// 💡 修正: GenerateContentStreamを非同期で実行し、Next()メソッドで処理
+	go func() {
+		stream := s.model.GenerateContentStream(context.Background(), part)
+
+		// Next()メソッドを使ってストリームを処理（古いSDKの標準パターン）
+		for {
+			resp, err := stream.Next()
+			if err == io.EOF {
+				s.doneChan <- io.EOF
+				close(s.streamChan)
+				return
+			}
+			if err != nil {
+				s.doneChan <- err
+				close(s.streamChan)
+				return
+			}
+			s.streamChan <- resp
+		}
+	}()
+
+	// ユーザー入力をセッション履歴にコミット
+	s.history = contents
+
+	return nil
+}
+
+// RecvResponse はSDKからの応答を取得し、パイプラインの型に変換します。
+func (s *geminiLiveSession) RecvResponse() (*types.LowLatencyResponse, error) {
+	if s.streamChan == nil {
+		return nil, fmt.Errorf("stream not initialized. Call Send() first")
+	}
+
+	select {
+	case resp, ok := <-s.streamChan:
+		if !ok {
+			// ストリーム終了のチャネルが閉じている場合
+			select {
+			case err := <-s.doneChan:
+				if err == io.EOF {
+					return &types.LowLatencyResponse{Done: true}, nil
+				}
+				return nil, fmt.Errorf("gemini stream error: %w", err)
+			default:
+				return &types.LowLatencyResponse{Done: true}, nil
+			}
+		}
+
+		// チャンク処理
+		// 🚨 修正: genai.Part からテキストを安全に抽出
+		text := "" // Line 145: 使用されるため、未使用エラー解消
+		if resp.Candidates != nil && len(resp.Candidates) > 0 {
+			if len(resp.Candidates[0].Content.Parts) > 0 {
+
+				part := resp.Candidates[0].Content.Parts[0]
+
+				// genai.Part を genai.Text に型キャストしてテキストを抽出
+				if textChunk, ok := part.(genai.Text); ok { // Line 148: .Text メソッドがないエラーを解決
+					text = string(textChunk)
+
+					// 履歴用の応答バッファを更新
+					if len(s.currentResponse.Parts) == 0 {
+						s.currentResponse.Parts = append(s.currentResponse.Parts, genai.Text(text))
+					} else {
+						existingText := s.currentResponse.Parts[0].(genai.Text)
+						s.currentResponse.Parts[0] = existingText + genai.Text(text)
+					}
+
+					return &types.LowLatencyResponse{
+						Text: text,
+						Done: false,
+					}, nil
+				}
+			}
+		}
+		return &types.LowLatencyResponse{Text: "", Done: false}, nil
+
+	case err := <-s.doneChan:
+		if err == io.EOF {
+			return &types.LowLatencyResponse{Done: true}, nil
+		}
+		return nil, fmt.Errorf("gemini stream error: %w", err)
+	}
 }
 
 // Close はセッションを閉じます。
-func (w *liveSessionWrapper) Close() error {
+func (s *geminiLiveSession) Close() error {
 	log.Println("Closing Gemini Live session.")
-	return w.session.Close()
+	if s.doneChan != nil {
+		// 応答全体が完了したら、モデルの応答を履歴に追加
+		s.history = append(s.history, s.currentResponse)
+		s.doneChan = nil
+	}
+	// ストリームのチャネルは go routine 側でクローズされるため、ここで nil にするのみ
+	s.streamChan = nil
+	return nil
 }
 
 // --- LiveClientの実装 ---
@@ -82,61 +197,23 @@ func NewLiveClient(ctx context.Context, apiKey string) (*LiveClient, error) {
 	if apiKey == "" {
 		return nil, fmt.Errorf("gemini api key is empty")
 	}
-	log.Println("Gemini Live Client initialized.")
-	// TODO: ここで実際の Gemini SDK Client を初期化し、*LiveClient に保持します。
-	return &LiveClient{apiKey: apiKey}, nil
+
+	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	if err != nil {
+		return nil, fmt.Errorf("error creating gemini client: %w", err)
+	}
+
+	log.Println("Gemini Live Client initialized successfully.")
+	return &LiveClient{client: client}, nil
 }
 
 // Connect は Gemini Live API への新しいセッションを確立します。
 func (c *LiveClient) Connect(ctx context.Context, config types.LiveAPIConfig) (LiveSession, error) {
-	if c.apiKey == "" {
-		return nil, fmt.Errorf("cannot connect: api key is missing")
+	if c.client == nil {
+		return nil, fmt.Errorf("cannot connect: gemini client is not initialized")
 	}
 
 	log.Printf("Connecting to Live API with model: %s, Instruction: %s...", config.Model, config.SystemInstruction)
 
-	// 💡 TODO: ここに実際の SDK 接続ロジックを実装
-	rawSession := newMockSession()
-
-	return &liveSessionWrapper{session: rawSession}, nil
-}
-
-// --- MOCK: SDKの挙動をシミュレートするためのダミー実装 ---
-
-// mockSession は sdkLiveStream インターフェースを満たすダミー構造体
-type mockSession struct {
-	// ストリームの終了をシミュレートするためのカウンタ
-	recvCount int
-}
-
-func newMockSession() *mockSession {
-	log.Println("[MOCK] Created dummy SDK Live Session. Only 5 messages will be simulated.")
-	return &mockSession{}
-}
-
-func (m *mockSession) SDKSend(data interface{}) error {
-	log.Printf("[MOCK] Input data received by SDK MOCK. (Type: %T)", data)
-	return nil
-}
-
-func (m *mockSession) SDKRecv() (interface{}, error) {
-	m.recvCount++
-	if m.recvCount > 5 {
-		// 5回応答をシミュレートした後、ストリーム終了をシミュレート
-		log.Println("[MOCK] Simulated stream end.")
-		return nil, fmt.Errorf("EOF") // ストリーム終了をエラーとして返すのが一般的
-	}
-
-	time.Sleep(10 * time.Millisecond)
-
-	// 実際の SDK 応答型のダミー構造体を返す
-	return struct {
-		Text string
-		Done bool
-	}{"chunk", false}, nil
-}
-
-func (m *mockSession) Close() error {
-	log.Println("[MOCK] SDK Session Closed.")
-	return nil
+	return newGeminiLiveSession(c.client, config), nil
 }
