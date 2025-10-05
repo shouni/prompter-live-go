@@ -3,7 +3,9 @@ package apis
 import (
 	"context"
 	"fmt"
-	"time" // net/http を削除
+	"time"
+
+	"prompter-live-go/internal/util"
 
 	"golang.org/x/oauth2"
 	"google.golang.org/api/option"
@@ -12,12 +14,9 @@ import (
 
 // YouTubeClient は YouTube Data API と連携するためのクライアントです。
 type YouTubeClient struct {
-	// YouTube Data API サービスオブジェクト。これを使ってAPI呼び出しを行います。
 	service *youtube.Service
-	// 認証トークンの設定
-	config *oauth2.Config
-	// 現在のトークン情報（アクセストークン、リフレッシュトークン、有効期限など）
-	token *oauth2.Token
+	config  *oauth2.Config
+	token   *oauth2.Token
 }
 
 // NewYouTubeClient は新しい YouTubeClient のインスタンスを作成し、APIサービスを初期化します。
@@ -26,54 +25,73 @@ func NewYouTubeClient(ctx context.Context, config *oauth2.Config, token *oauth2.
 		config: config,
 		token:  token,
 	}
-
-	// 1. トークンを使って HTTP クライアントを生成
-	// oauth2.Config.Client はトークン期限切れの場合、リフレッシュトークンを使って
-	// 自動的にトークンをリフレッシュする機能を持っています。
 	httpClient := config.Client(ctx, token)
-
-	// 2. HTTP クライアントを使って YouTube サービスを初期化
 	service, err := youtube.NewService(ctx, option.WithHTTPClient(httpClient))
 	if err != nil {
 		return nil, fmt.Errorf("YouTube サービス初期化に失敗: %w", err)
 	}
 	client.service = service
-
-	// 3. 初期トークンの有効性を確認（オプション）
-	// この時点でトークンがリフレッシュされていれば、client.token に新しい情報が書き込まれます。
-	// ただし、Client() はトークンリフレッシュが発生しても、client.tokenを自動更新しません。
-	// 実際のリフレッシュの保存ロジックは、ポーリング時にトークンをチェックして行います。
-
 	fmt.Println("YouTube API クライアントが正常に初期化されました。")
 	return client, nil
 }
 
-// GetLatestComments は指定されたチャンネルIDの最新コメントを取得します。
-// 実際のポーリングでは、pageTokenやlastCheckedTimeを使って絞り込みますが、今回は基本形を定義します。
-func (c *YouTubeClient) GetLatestComments(channelID string) ([]*youtube.CommentThread, error) {
-	fmt.Printf("API呼び出し: 最新コメントを取得中 (チャンネルID: %s)...\n", channelID)
+// PollingFunc はポーリングサイクルで実行される処理の型定義です。
+type PollingFunc func(ctx context.Context, yc *YouTubeClient, gc *GeminiClient, channelID string, dryRun bool) error
 
-	// チャンネルに紐づく全ての動画のコメントを取得するため、
-	// 実際にはチャンネルの動画リストを取得し、それぞれの動画のコメントを取得する必要があります。
-	// ここでは、最も簡単な方法として「チャンネルのアップロードリスト」のコメントスレッドを取得するクエリをシミュレートします。
+// StartPolling は定期的に API を呼び出すポーリングループを実行します。
+func (c *YouTubeClient) StartPolling(ctx context.Context, cycleFunc PollingFunc, gc *GeminiClient, channelID string, pollingInterval time.Duration, dryRun bool) error {
+	ticker := time.NewTicker(pollingInterval)
+	defer ticker.Stop()
+
+	fmt.Printf("📢 ポーリングを開始します。間隔: %s\n", pollingInterval)
+
+	// サービス開始時にも一度ポーリングを実行
+	if err := cycleFunc(ctx, c, gc, channelID, dryRun); err != nil {
+		fmt.Printf("⚠️ サービス起動時の初回ポーリングエラー: %v\n", err)
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			// Ticker が切れるごとにポーリングサイクルを実行
+			if err := cycleFunc(ctx, c, gc, channelID, dryRun); err != nil {
+				fmt.Printf("⚠️ ポーリング実行エラー: %v\n", err)
+			}
+
+			// ポーリング後、トークンの状態をチェックし、リフレッシュされていたら保存
+			if c.CheckTokenRefreshStatus() {
+				fmt.Println("♻️ トークンがリフレッシュされました。ファイルに保存します...")
+
+				newToken := c.GetToken()
+				if err := util.SaveToken(util.TokenPath, newToken); err != nil {
+					fmt.Printf("❌ リフレッシュトークンの保存に失敗: %v\n", err)
+				} else {
+					fmt.Println("✅ 新しいトークンを 'config/token.json' に保存しました。")
+				}
+			}
+
+		case <-ctx.Done():
+			fmt.Println("📢 ポーリングサービスが停止されました。")
+			return nil
+		}
+	}
+}
+
+// GetLatestComments は指定されたチャンネルIDの最新コメントを取得します。
+func (c *YouTubeClient) GetLatestComments(channelID string) ([]*youtube.CommentThread, error) {
+	fmt.Printf("[%s] API呼び出し: 最新コメントを取得中 (チャンネルID: %s)...\n", time.Now().Format("15:04:05"), channelID)
 
 	call := c.service.CommentThreads.List([]string{"snippet"})
-
-	// APIクォータ節約のため、最大10件に制限
 	call = call.MaxResults(10)
-
-	// チャンネルの最新動画のコメントを取得するため、'channelId' を使用
-	// AllThreads はCommentThreadsListCallのメソッドではないため削除
 	call = call.ChannelId(channelID)
+	call = call.Order("time")
 
 	response, err := call.Do()
 	if err != nil {
-		// APIからエラーが返された場合、トークン切れの可能性がある
 		return nil, fmt.Errorf("YouTube APIからコメントスレッドの取得に失敗: %w", err)
 	}
 
-	// ログとして取得件数を出力
-	fmt.Printf("API応答: コメントスレッドを %d 件取得しました。\n", len(response.Items))
+	fmt.Printf("[%s] API応答: コメントスレッドを %d 件取得しました。\n", time.Now().Format("15:04:05"), len(response.Items))
 
 	return response.Items, nil
 }
@@ -89,7 +107,6 @@ func (c *YouTubeClient) PostReply(parentCommentID, text string) (*youtube.Commen
 		},
 	}
 
-	// CommentThreads ではなく Comments サービスを使って返信を投稿
 	call := c.service.Comments.Insert([]string{"snippet"}, comment)
 
 	result, err := call.Do()
@@ -107,16 +124,9 @@ func (c *YouTubeClient) GetToken() *oauth2.Token {
 }
 
 // CheckTokenRefreshStatus は、トークンがリフレッシュされたかどうかをチェックするダミー関数です。
-// oauth2.Client は内部でリフレッシュを行いますが、新しいトークンを外部に公開するフックがないため、
-// 実際にはトークンを保持しているクライアント側で状態を定期的に確認する必要があります。
-// ここでは、ダミーとして現在のトークンの有効期限をチェックします。
 func (c *YouTubeClient) CheckTokenRefreshStatus() bool {
-	// 有効期限が残り5分を切ったら、トークンが古い可能性があると判断
 	if time.Until(c.token.Expiry) < 5*time.Minute {
-		// 本番環境では、ここでトークンをリフレッシュし、新しいトークンを返すべきですが、
-		// oauth2.Client は呼び出し時に自動リフレッシュを行うため、ここでは状態通知のみ。
-		// 実際のリフレッシュは GetLatestComments などAPI呼び出し時に暗黙的に行われます。
-		return true // トークンが期限切れに近い、または期限切れである
+		return true
 	}
 	return false
 }
