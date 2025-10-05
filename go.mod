@@ -3,7 +3,7 @@ module prompter-live-go
 go 1.25.0
 
 require (
-	github.com/google/generative-ai-go v0.19.0
+	github.com/google/generative-ai-go v0.20.1
 	github.com/spf13/cobra v1.10.1
 	golang.org/x/oauth2 v0.31.0
 	google.golang.org/api v0.239.0
