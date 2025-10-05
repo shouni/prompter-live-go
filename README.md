@@ -40,15 +40,20 @@
 ### 1\. Go のインストールとビルド
 
 ```
+
 # リポジトリをクローン
+
 git clone git@github.com:shouni/prompter-live-go.git
 cd prompter-live-go
 
 # 依存関係を整理
+
 go mod tidy
 
 # 実行ファイルを bin/ ディレクトリに生成
-go build -o bin/prompter_live
+
+go build -o bin/prompter\_live
+
 ```
 
 ### 2\. 環境変数の設定 (必須)
@@ -58,21 +63,31 @@ Goアプリケーションは、以下の変数名で認証情報を読み込み
 #### macOS / Linux (bash/zsh)
 
 ```
+
 # Gemini API Key（AIとの接続に必要）
-export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+
+export GEMINI\_API\_KEY="YOUR\_GEMINI\_API\_KEY"
+
 # YouTube (GCP) クライアント認証情報
-export YT_CLIENT_ID="YOUR_GCP_CLIENT_ID"
-export YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
+
+export YT\_CLIENT\_ID="YOUR\_GCP\_CLIENT\_ID"
+export YT\_CLIENT\_SECRET="YOUR\_GCP\_CLIENT\_SECRET"
+
 ```
 
 #### Windows (PowerShell)
 
 ```
+
 # Gemini API Key（AIとの接続に必要）
-$env:GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+
+$env:GEMINI\_API\_KEY="YOUR\_GEMINI\_API\_KEY"
+
 # YouTube (GCP) クライアント認証情報
-$env:YT_CLIENT_ID="YOUR_GCP_CLIENT_ID"
-$env:YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
+
+$env:YT\_CLIENT\_ID="YOUR\_GCP\_CLIENT\_ID"
+$env:YT\_CLIENT\_SECRET="YOUR\_GCP\_CLIENT\_SECRET"
+
 ```
 
 ### 3\. Google Cloud Platform (GCP) の設定 (重要)
@@ -80,11 +95,9 @@ $env:YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 本ツールを実行するには、GCPプロジェクトで以下の設定が完了している必要があります。
 
 1.  **YouTube Data API v3 の有効化**:
-
     * GCPコンソールで、使用するプロジェクトの **「YouTube Data API v3」** を有効化してください。
 
 2.  **OAuth リダイレクト URI の登録**:
-
     * OAuth 2.0 クライアント ID（ウェブ アプリケーション）の設定で、以下のコールバック URI を**承認済みリダイレクト URI** に追加してください。
         * `http://localhost:8080/callback`
         * `http://localhost:8081/callback` (ポート競合時の予備)
@@ -92,6 +105,32 @@ $env:YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 ### 4\. プロンプト設定（System Instruction）
 
 AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruction`) で直接渡す方式です。**ただし、次のセクションで述べる重大な技術的制約があるため、その機能には注意が必要です。**
+
+-----
+
+## 🎯 導入戦略とテストの焦点 (PoCの進め方)
+
+このツールは現在、**AIのペルソナ安定性**と**外部データ連携の欠如**という課題を抱えています。そのため、導入フェーズでは「コメント応答」に焦点を絞り、以下の戦略でテストを進めることを強く推奨します。
+
+### 1\. ペルソナ安定性の検証に集中
+
+最優先で、AIがキャラクター設定を破綻させずにどれだけ長時間稼働できるかをテストします。
+
+* **テスト環境:** ご自身のチャンネルでの**限定公開**ライブ配信。
+* **検証項目:** 様々な長さやトーンのコメントを投稿し、AIが設定した**System Instruction (`-i` フラグ)**のペルソナやルール（応答トーン、禁止事項など）を**維持できている時間**を測定します。
+* **実験の推奨:** シンプルなプロンプト、詳細なプロンプト、プロモーション情報を盛り込んだプロンプトなど、複数パターンを比較し、最も安定する設定を探してください。
+
+### 2\. 静的データ運用によるプロモーション戦略
+
+外部 API やデータベース連携（Function Calling/RAG）は未実装のため、プロモーション情報はプロンプト内に静的に含めます。
+
+* **推奨事項**:
+    1.  **最小限のデータ:** 商品名、特徴、購入URLなど、最も重要な情報のみを**簡潔に** `-i` フラグに記述します。
+    2.  **トリガーの明記:** 視聴者が「サイト」「価格」「どこで買う」といった特定のキーワードを使った場合のみ、その静的データ（URLなど）を提示するように**プロンプトで厳しく指示**します。
+
+### 3\. 配信者音声入力ロジックの未統合
+
+現在はコメント（テキスト）にのみ反応します。配信者自身の発言はAIに伝わらないため、**配信中はAIの応答とご自身の会話が競合しないよう、手動で注意深く確認**する必要があります。
 
 -----
 
@@ -109,7 +148,7 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 
 | 課題 | 詳細 | 影響 |
 | :--- | :--- | :--- |
-| **オーディオデータはダミー** | 現在のパイプラインは、**ダミーのオーディオデータ**を継続的にAPIに送信し、接続を維持しているだけです。マイクからのリアルタイム音声キャプチャロジックは実装されていません。 | AIは\*\*配信者自身の発言（音声）\*\*を一切考慮できず、YouTubeチャット（テキスト）のみに基づいて応答します。これにより、**会話の文脈を完全に見失う**可能性があります。 |
+| **オーディオデータはダミー** | 現在のパイプラインは、**ダミーのオーディオデータ**を継続的にAPIに送信し、接続を維持しているだけです。マイクからのリアルタイム音声キャプチャロジックは実装されていません。 | AIは**配信者自身の発言（音声）**を一切考慮できず、YouTubeチャット（テキスト）のみに基づいて応答します。これにより、**会話の文脈を完全に見失う**可能性があります。 |
 | **今後の対応** | マイク入力を統合するには、OS依存の外部オーディオライブラリ（例: PortAudioなど）の導入と、複雑な音声処理ロジックの実装が不可欠です。 | |
 
 ### 現時点でテスト可能な機能
@@ -129,11 +168,15 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 本ツールを最初に実行する際、YouTubeへのコメント投稿権限を得るための**OAuth 2.0 認証**を行います。
 
 ```
+
 # 標準ポートで認証を開始
-./bin/prompter_live auth
+
+./bin/prompter\_live auth
 
 # ポート競合が発生した場合
-./bin/prompter_live auth --oauth-port 8082
+
+./bin/prompter\_live auth --oauth-port 8082
+
 ```
 
 > **Note:** 認証成功後、プロジェクトルートに `config/token.json` ファイルが生成されます。
@@ -143,11 +186,14 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 認証が完了したら、Gemini Live API と YouTube Live Chat への接続を確立し、自動応答を開始します。
 
 ```
+
 # Live APIに接続し、AIによる自動応答とコメント投稿を開始
-./bin/prompter_live run \
-  -c "UCxxxxxxxxxxxxxxxxxxxxxxxxxx" \
-  -m "gemini-2.5-flash" \
-  -i "あなたは視聴者コメントを代行するAIです。フレンドリーかつ簡潔に返答してください。"
+
+./bin/prompter\_live run  
+\-c "UCxxxxxxxxxxxxxxxxxxxxxxxxxx"  
+\-m "gemini-2.5-flash"  
+\-i "あなたは視聴者コメントを代行するAIです。フレンドリーかつ簡潔に返答してください。"
+
 ```
 
 #### 固有フラグ
@@ -165,6 +211,5 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 ### 📜 ライセンス (License)
 
 このプロジェクトは [MIT License](https://opensource.org/licenses/MIT) の下で公開されています。
-
 
 
