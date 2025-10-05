@@ -2,134 +2,130 @@ package gemini
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
-	// "fmt" は未使用のため削除
-	// "time" は未使用のため削除
 
 	"prompter-live-go/internal/types"
 
 	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/iterator"
 )
 
 // geminiLiveSession は Gemini Live API との対話セッションを管理します。
 type geminiLiveSession struct {
 	chatSession *genai.ChatSession
-	// 💡 修正: currentResponse を統合されたコンテンツを保持する []genai.Part に変更するか、
-	// 		  応答全体を保持したまま、内容を適切に扱うようにロジックを修正します。
-	// 		  ここでは簡略化のため、ストリーム中に蓄積されるテキスト全体を保持します。
-	currentText string                              // ストリーム中に蓄積される応答テキスト
-	streamChan  chan *genai.GenerateContentResponse // ストリーム応答を送信するチャネル
-	doneChan    chan error                          // ストリーム終了またはエラーを通知するチャネル
-	mu          sync.Mutex
+
+	// responseChan は完全な応答テキストと Done シグナルをパイプラインに送信します。
+	responseChan chan *types.LowLatencyResponse
+	// doneChan は内部ストリーム処理が完了したことを通知します。
+	doneChan chan error
+	mu       sync.Mutex
 }
 
 // newGeminiLiveSession は新しい geminiLiveSession を作成します。
 func newGeminiLiveSession(model *genai.GenerativeModel, config types.LiveAPIConfig) *geminiLiveSession {
-	// システム指示がある場合は、ChatSession の履歴に先行する Content として設定できますが、
-	// Live Chat のユースケースでは通常、モデル設定として渡されます。
-	// ここでは単純に ChatSession を開始します。
+	// 履歴を自動で管理する ChatSession を開始
+	// システム指示の設定は、genai.GenerativeModel の設定時に行われていることを前提とします。
 	chatSession := model.StartChat()
 
 	return &geminiLiveSession{
-		chatSession: chatSession,
-		streamChan:  make(chan *genai.GenerateContentResponse),
-		doneChan:    make(chan error, 1),
+		chatSession:  chatSession,
+		responseChan: make(chan *types.LowLatencyResponse, 1),
+		doneChan:     make(chan error, 1),
 	}
 }
 
-// Send はメッセージをモデルに送信し、ストリーミングを開始します。
+// Send はメッセージをモデルに送信し、応答が完了するまでブロックしません。
+// 応答完了後、responseChan に完全な応答を一度だけ書き込みます。
 func (s *geminiLiveSession) Send(ctx context.Context, data types.LiveStreamData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// 既存のストリームがまだ終了していない場合、先に終了シグナルを送る
-	if s.streamChan != nil {
-		select {
-		case s.doneChan <- io.EOF: // 処理完了シグナル
-		default:
-		}
-		close(s.streamChan)
-	}
-
-	// 新しいストリームセッションの初期化
-	s.streamChan = make(chan *genai.GenerateContentResponse)
-	s.currentText = "" // 💡 修正: 応答テキストをリセット
-
+	// ユーザー入力の genai.Part を作成
 	userInput := genai.Text(data.Text)
 
-	log.Printf("Gemini sending: %s", data.Text)
-
-	// 非同期でストリーミングを実行するゴルーチンを開始
+	// 非同期でストリーム処理を実行
 	go func() {
 		defer func() {
+			// 処理が完了したことを通知
 			s.doneChan <- io.EOF
-			close(s.streamChan)
-			log.Println("Gemini stream finished.")
 		}()
 
+		// 1. ストリームを開始
 		stream := s.chatSession.SendMessageStream(ctx, userInput)
+		var responseBuilder strings.Builder
 
+		// 2. ストリームが完了するまでチャンクを累積
 		for {
 			resp, err := stream.Next()
-			if err == iterator.Done {
-				return
+			if err == io.EOF {
+				break // ストリーム完了
 			}
 			if err != nil {
 				log.Printf("Gemini stream error: %v", err)
-				s.doneChan <- err
+				s.responseChan <- &types.LowLatencyResponse{ResponseText: fmt.Sprintf("Error: %v", err.Error()), Done: true}
 				return
 			}
-			s.streamChan <- resp
+
+			// チャンクからテキストを抽出して累積
+			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
+				// genai.Part はスライスなので、最初の要素をチェック
+				if len(resp.Candidates[0].Content.Parts) > 0 {
+					if textPart, ok := resp.Candidates[0].Content.Parts[0].(genai.Text); ok {
+						responseBuilder.WriteString(string(textPart))
+					}
+				}
+			}
 		}
+
+		// 3. 累積した完全な応答を responseChan に一度だけ送信
+		fullResponse := responseBuilder.String()
+		if fullResponse != "" {
+			s.responseChan <- &types.LowLatencyResponse{
+				ResponseText: fullResponse,
+				Done:         true, // 応答完了シグナル
+			}
+		}
+
+		// 4. (重要) responseChan に何も送信されない場合 (空の応答など) に備え、Doneシグナルを送り、パイプラインのブロックを解除する
+		if fullResponse == "" {
+			s.responseChan <- &types.LowLatencyResponse{ResponseText: "", Done: true}
+		}
+
 	}()
 
 	return nil
 }
 
-// RecvResponse はストリームから次の応答チャンクを受け取ります。
+// RecvResponse は完全な応答が生成されるのを待ち、それを一度だけ返します。
 func (s *geminiLiveSession) RecvResponse() (*types.LowLatencyResponse, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	select {
-	case err := <-s.doneChan:
-		if err != nil && err != io.EOF {
-			return nil, err
+	case <-s.doneChan:
+		// 内部ストリーム処理が完了したことを示す
+		// responseChan からまだ読み込まれていないデータがあれば読み込む
+		select {
+		case resp := <-s.responseChan:
+			return resp, nil
+		default:
+			// Done が通知されたが、responseChan にデータが残っていない場合は、EOFを返す
+			return &types.LowLatencyResponse{Done: true}, io.EOF
 		}
-		return &types.LowLatencyResponse{Done: true}, nil
 
-	case resp, ok := <-s.streamChan:
+	case resp, ok := <-s.responseChan:
 		if !ok {
-			return &types.LowLatencyResponse{Done: true}, nil
+			return nil, io.EOF
 		}
 
-		// 応答チャンクからテキストを取得
-		chunkText := ""
-		if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
-			// ストリーム応答からテキストチャンクを取得し、統合
-			for _, part := range resp.Candidates[0].Content.Parts {
-				if textPart, ok := part.(genai.Text); ok {
-					chunkText += string(textPart)
-				}
-			}
-		}
-
-		// 💡 修正: currentText に追記
-		s.currentText += chunkText
-
-		// 応答をタイプ変換して返す
-		return &types.LowLatencyResponse{
-			ResponseText: chunkText,
-			Done:         false,
-		}, nil
+		return resp, nil
 	}
 }
 
-// Close はセッションを閉じ、リソースを解放します。
+// Close はセッションとクライアントをクリーンアップします。
 func (s *geminiLiveSession) Close() {
-	// ChatSession は明示的なクローズメソッドがないため、特に処理は不要です。
-	// チャネルのクローズは Send/RecvResponse のロジックで安全に実行されています。
+	// ここでは特に何も行いません。
 }
