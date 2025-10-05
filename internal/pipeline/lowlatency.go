@@ -8,25 +8,22 @@ import (
 
 	"prompter-live-go/internal/gemini"
 	"prompter-live-go/internal/types"
-	// YouTube クライアントをインポート
 	"prompter-live-go/internal/youtube"
 )
 
 // LowLatencyPipeline は低遅延処理の中核を担い、音声入力と AI 応答のストリームを管理します。
 type LowLatencyPipeline struct {
-	liveClient gemini.LiveClient
-	// YouTube クライアント構造体を追加
+	liveClient    gemini.LiveClient
 	youtubeClient *youtube.Client
 
 	config types.LiveAPIConfig
 }
 
 // NewLowLatencyPipeline は新しいパイプラインインスタンスを作成します。
-// youtubeClient を引数に追加
 func NewLowLatencyPipeline(client gemini.LiveClient, youtubeClient *youtube.Client, config types.LiveAPIConfig) *LowLatencyPipeline {
 	return &LowLatencyPipeline{
 		liveClient:    client,
-		youtubeClient: youtubeClient, // 構造体に格納
+		youtubeClient: youtubeClient,
 		config:        config,
 	}
 }
@@ -44,10 +41,11 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	responseChan := make(chan *types.LowLatencyResponse)
 	errorChan := make(chan error, 1)
 
+	// 1. レスポンス受信ハンドラを開始
 	go p.handleReceive(session, responseChan, errorChan)
 
-	// TODO: 実際のオーディオ入力は、このダミー関数を置き換える必要があります。
-	go p.handleSend(session, errorChan)
+	// 2. ライブチャットのポーリングとGeminiへの入力ハンドラを開始 (ダミーオーディオを置き換え)
+	go p.handleLiveChatPollingAndInput(ctx, session, errorChan)
 
 	for {
 		select {
@@ -61,13 +59,11 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 			if resp.Text != "" {
 				log.Printf("Received AI Text: %s", resp.Text)
 
-				// 【コアロジック】AI応答をYouTubeに投稿する
+				// AI応答をYouTubeに投稿する
 				if p.youtubeClient != nil {
-					// 非同期でコメント投稿を実行し、パイプラインの遅延を防ぎます。
+					// 非同期でコメント投稿を実行
 					go func(text string) {
-						// コメント投稿ロジック
 						if err := p.youtubeClient.PostComment(ctx, text); err != nil {
-							// 投稿エラーはパイプライン全体を停止させず、ログに出力
 							log.Printf("Error posting comment to YouTube: %v", err)
 						}
 					}(resp.Text)
@@ -85,6 +81,56 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	}
 }
 
+// handleLiveChatPollingAndInput は YouTube Live Chat を定期的にポーリングし、新しいコメントを
+// Gemini Live API セッションにテキストデータとして送信します。
+func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, session gemini.LiveSession, errorChan chan error) {
+	// YouTube Live Chat APIの推奨ポーリング間隔に合わせて設定
+	// Note: この間隔がクォータ消費に直結します。
+	const pollingInterval = 5 * time.Second
+	ticker := time.NewTicker(pollingInterval)
+	defer ticker.Stop()
+
+	log.Printf("Starting YouTube Live Chat polling every %s...", pollingInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Println("Input handler shutting down.")
+			return
+		case <-ticker.C:
+			// ライブチャットメッセージを取得
+			comments, err := p.youtubeClient.FetchLiveChatMessages(ctx)
+			if err != nil {
+				// ライブ配信終了などのエラーは致命的ではないため、ログに記録してポーリングを継続
+				log.Printf("Error fetching live chat messages: %v", err)
+				continue
+			}
+
+			if len(comments) > 0 {
+				log.Printf("Fetched %d new comments. Sending to Gemini Live API...", len(comments))
+
+				// 各コメントをGemini Live APIセッションに送信
+				for _, comment := range comments {
+					// LiveStreamDataを使用してテキストとして送信します。
+					inputData := types.LiveStreamData{
+						// テキストデータであることを示すMIME Type
+						MimeType: "text/plain",
+						// メッセージの内容をバイトスライスに変換して送信
+						Data: []byte(comment.Message),
+					}
+
+					if err := session.Send(inputData); err != nil {
+						errorChan <- fmt.Errorf("error sending comment to Gemini Live API: %w", err)
+						return // 送信エラーはパイプライン全体を停止
+					}
+					// ログに誰のコメントを送信したかを含める
+					log.Printf("Sent to AI: '%s' (by %s)", comment.Message, comment.Author)
+				}
+			}
+		}
+	}
+}
+
 // handleReceive は LiveSession からの応答を継続的に受け取ります。
 func (p *LowLatencyPipeline) handleReceive(session gemini.LiveSession, responseChan chan *types.LowLatencyResponse, errorChan chan error) {
 	for {
@@ -98,34 +144,6 @@ func (p *LowLatencyPipeline) handleReceive(session gemini.LiveSession, responseC
 
 		if resp.Done {
 			return
-		}
-	}
-}
-
-// handleSend は LiveSession に入力データを継続的に送信します。
-func (p *LowLatencyPipeline) handleSend(session gemini.LiveSession, errorChan chan error) {
-	// ダミーのデータ送信ループ
-	timeout := time.After(5 * time.Second)
-
-	for {
-		select {
-		case <-timeout:
-			log.Println("Dummy input stream finished after 5 seconds.")
-			// 入力側を終了し、AIからの応答を待ちます。
-			return
-
-		default:
-			// ダミーのオーディオデータを送信
-			dummyData := types.LiveStreamData{
-				MimeType: "audio/pcm;rate=16000",
-				Data:     make([]byte, 8000), // 0.5秒分の16kHzモノラルPCMデータ
-			}
-			if err := session.Send(dummyData); err != nil {
-				errorChan <- fmt.Errorf("error sending data: %w", err)
-				return
-			}
-			// リアルタイムをシミュレートするために少し待機
-			time.Sleep(500 * time.Millisecond)
 		}
 	}
 }
