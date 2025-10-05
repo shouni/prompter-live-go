@@ -5,9 +5,9 @@ import (
 	"fmt"
 	"log"
 	"time"
-	// 認証ヘルパーやSDKを想定（MOCK）
-	// "prompter-live-go/internal/util"
-	// "google.golang.org/api/youtube/v3"
+	// 💡 TODO: ここに実際の YouTube SDK や OAuth2 ライブラリのインポートが必要です
+	// 例: "google.golang.org/api/youtube/v3"
+	// 例: "golang.org/x/oauth2"
 )
 
 // Comment は YouTube のライブチャットメッセージを表す構造体
@@ -20,26 +20,26 @@ type Comment struct {
 // Client は YouTube Live Chat API との連携を管理します。
 type Client struct {
 	channelID string
-	// youtubeService *youtube.Service // 実際のYouTube SDKサービス
-	// MOCK: 認証ポートを保持
+	// TODO: ここに youtube.Service などの実際の YouTube SDK サービスインスタンスを保持します
+	// 例: youtubeService *youtube.Service
+
+	// 認証ポートは初期化時のみ使用
 	oauthPort int
-	// MOCK: ポーリング用のカーソル
+
+	// MOCK: ポーリング用のカーソルを維持 (MOCK用)
 	lastPollingTime time.Time
 }
 
 // NewClient は新しい YouTube Client のインスタンスを作成します。
-// 💡 修正: 認証ポート (oauthPort) を引数で受け取る
 func NewClient(ctx context.Context, channelID string, oauthPort int) (*Client, error) {
 	if channelID == "" {
 		return nil, fmt.Errorf("youtube channel ID is empty")
 	}
 
-	// 💡 修正: util.GetOAuth2Config(0) のハードコードを避けるため、ポートを渡す
-	// MOCK: 実際にはここで認証フローを実行し、APIサービスを初期化
-
-	// 例: config, err := util.GetOAuth2Config(oauthPort)
-	// 例: token, err := util.GetToken(config)
-	// 例: service, err := youtube.NewService(ctx, option.WithTokenSource(config.TokenSource(ctx, token)))
+	// 💡 TODO: ここに実際の OAuth 認証フローを実装
+	// 1. 認証設定を取得 (oauthPort を利用)
+	// 2. トークンを取得またはリフレッシュ
+	// 3. YouTube API サービス (youtube.Service) を初期化し、*Client に保持
 
 	log.Printf("YouTube Client initialized for channel %s, using OAuth Port: %d", channelID, oauthPort)
 
@@ -52,10 +52,11 @@ func NewClient(ctx context.Context, channelID string, oauthPort int) (*Client, e
 
 // FetchLiveChatMessages は新しいライブチャットメッセージを取得します。
 func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
-	// MOCK: 実際には youtubeService.LiveChatMessages.List を呼び出す
+	// 💡 TODO: ここに実際の SDK 呼び出しロジックを実装
+	// 1. c.youtubeService.LiveChatMessages.List を呼び出し、liveChatId を指定
+	// 2. 応答から新しいコメントを抽出し、Comment スライスに変換
 
-	// 現在のチャットを取得するためのMOCKロジック
-	// 5秒ごとに1つの新しいコメントをシミュレート
+	// --- MOCK: 実際のコメント取得をシミュレート ---
 	if time.Since(c.lastPollingTime) > 20*time.Second {
 		c.lastPollingTime = time.Now()
 		log.Println("Fetching live chat messages [MOCK]...")
@@ -63,8 +64,8 @@ func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
 		// ダミーデータを返す
 		return []Comment{
 			{
-				Author:    "UserA",
-				Message:   "こんにちは、AIプロンプターさん！**今日のテーマ**は何ですか？",
+				Author:    "UserB",
+				Message:   "AI さん、今日は天気が良いですね！何か面白い話をしてくれませんか？",
 				Timestamp: time.Now(),
 			},
 		}, nil
@@ -75,7 +76,10 @@ func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
 
 // PostComment は指定されたテキストをライブチャットに投稿します。
 func (c *Client) PostComment(ctx context.Context, text string) error {
-	// MOCK: 実際には youtubeService.LiveChatMessages.Insert を呼び出す
+	// 💡 TODO: ここに実際の SDK 呼び出しロジックを実装
+	// 1. c.youtubeService.LiveChatMessages.Insert を呼び出し、コメントを投稿
+
+	// --- MOCK: 実際のコメント投稿をシミュレート ---
 	log.Printf("YouTube Comment Posted [MOCK]: %s", text)
 	return nil
 }
