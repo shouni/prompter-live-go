@@ -4,7 +4,6 @@ import (
 	"context"
 	"fmt"
 	"log/slog"
-	"regexp"
 	"strings"
 	"time"
 
@@ -41,7 +40,6 @@ func NewYouTubeClient(ctx context.Context, channelID string) (*YouTubeClient, er
 	}
 
 	// 2. カスタム TokenSource の作成: リフレッシュ時に自動保存するロジックをラップ
-	// これにより、トークンがリフレッシュされるたびに config/token.json が自動更新されます。
 	tokenSource := util.NewAutoSavingTokenSource(config.TokenSource(ctx, token))
 
 	// 3. HTTP Client の作成: トークンソースを使用
@@ -104,15 +102,16 @@ func (c *YouTubeClient) GetLiveChatIDFromChannel(ctx context.Context) (string, e
 
 	liveChatID := videoResponse.Items[0].LiveStreamingDetails.ActiveLiveChatId
 	slog.Info("ライブチャットIDを取得しました。", "live_chat_id", liveChatID, "video_id", videoID)
+	// ライブチャットIDを更新
+	c.liveChatID = liveChatID
 	return liveChatID, nil
 }
 
 // FetchLiveChatMessages はライブチャットIDを使用して新しいコメントを取得します。
 func (c *YouTubeClient) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
-	// liveChatIDが設定されていない場合、アクティブなライブ配信を検索して設定
 	if c.liveChatID == "" {
-		var err error
-		c.liveChatID, err = c.GetLiveChatIDFromChannel(ctx)
+		// liveChatIDがまだ設定されていない場合、取得を試みる
+		_, err := c.GetLiveChatIDFromChannel(ctx)
 		if err != nil {
 			return nil, fmt.Errorf("ライブチャットIDの取得に失敗: %w", err)
 		}
@@ -144,7 +143,6 @@ func (c *YouTubeClient) FetchLiveChatMessages(ctx context.Context) ([]Comment, e
 		}
 
 		// lastCommentTime より厳密に新しいコメントのみを処理
-		// NOTE: APIは最新のメッセージを返すため、過去のメッセージを誤って再処理しないよう注意が必要です。
 		if publishedTime.After(c.lastCommentTime) {
 			comment := Comment{
 				ID:      item.Id,
@@ -193,68 +191,7 @@ func (c *YouTubeClient) PostComment(ctx context.Context, message string) error {
 	return nil
 }
 
-// sanitizeMessage は Gemini からの応答を YouTube の制約に合わせて整形します。
-func sanitizeMessage(message string) string {
-	// 1. マークダウンのコードブロックを削除 (例: ```json)
-	re := regexp.MustCompile("(?s)```.*?```")
-	message = re.ReplaceAllString(message, "")
-
-	// 2. 過剰な改行を削除し、文字列の先頭と末尾の空白を削除
-	message = strings.TrimSpace(message)
-	message = strings.ReplaceAll(message, "\n", " ")
-
-	return message
-}
-
-// FetchAndProcessComments はコメントの取得、AI応答生成、および投稿を実行するメインロジックです。
-// この関数は cmd/run.go からポーリングループ内で呼び出されます。
-func FetchAndProcessComments(ctx context.Context, ytClient *YouTubeClient, geminiClient *GeminiClient, dryRun bool) error {
-	newComments, err := ytClient.FetchLiveChatMessages(ctx)
-	if err != nil {
-		return fmt.Errorf("コメント取得エラー: %w", err)
-	}
-
-	if len(newComments) == 0 {
-		slog.Info("新しいコメントはありませんでした。")
-		return nil
-	}
-
-	slog.Info("新しいコメントを検出しました。", "count", len(newComments))
-
-	// コメントごとにAI応答を生成
-	for _, comment := range newComments {
-		// 自身のコメントへの応答を防ぐ (DisplayNameが 'ライブちゃん' の場合など、設定に応じて調整)
-		// 厳密には authorDetails.IsChatOwner/IsChatModerator などを確認すべきだが、シンプルにDisplayNameでフィルタリング
-		// ただし、YouTube APIではAIの投稿者名（チャンネル名）を判別する標準的な方法がないため、
-		// 投稿者IDではなくDisplayNameで「ライブちゃん」を弾くと、ユーザー名が「ライブちゃん」の視聴者も弾かれる可能性がある。
-		// ここでは、投稿者を弾くのはやめて、応答の生成時にプロンプトで制御することを推奨します。
-
-		slog.Info("コメントを処理中", "author", comment.Author, "message", comment.Message)
-
-		// 1. Geminiで応答を生成
-		response, err := geminiClient.GenerateResponse(ctx, comment.Author, comment.Message)
-		if err != nil {
-			slog.Error("Gemini応答生成エラー", "error", err, "author", comment.Author)
-			continue
-		}
-
-		// 2. 応答を整形
-		sanitizedResponse := sanitizeMessage(response)
-
-		if sanitizedResponse == "" {
-			slog.Info("AIが空の応答を生成しました (スパムまたは無効なコメントと判断)")
-			continue
-		}
-
-		// 3. コメントの投稿
-		if dryRun {
-			slog.Warn("ドライラン: コメントは投稿されません。", "応答", sanitizedResponse)
-		} else {
-			if err := ytClient.PostComment(ctx, sanitizedResponse); err != nil {
-				slog.Error("コメント投稿失敗", "error", err, "response", sanitizedResponse)
-			}
-		}
-	}
-
-	return nil
+// GetLiveChatID は現在の LiveChatID を返します。
+func (c *YouTubeClient) GetLiveChatID() string {
+	return c.liveChatID
 }

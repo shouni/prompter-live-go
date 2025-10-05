@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"prompter-live-go/internal/apis"
+	"prompter-live-go/internal/services/live_processor"
 	"prompter-live-go/internal/util"
 
 	"github.com/spf13/cobra"
@@ -61,7 +62,7 @@ func runRunE(cmd *cobra.Command, args []string) error {
 	// Geminiクライアントの初期化
 	prompt, err := util.LoadPromptFile(runFlags.promptFile)
 	if err != nil {
-		return fmt.Errorf("Gemini クライアントの初期化に失敗: %w", err)
+		return fmt.Errorf("プロンプトファイルの読み込みに失敗: %w", err)
 	}
 	geminiClient, err := apis.NewGeminiClient(ctx, prompt)
 	if err != nil {
@@ -70,13 +71,15 @@ func runRunE(cmd *cobra.Command, args []string) error {
 	slog.Info("Gemini API クライアントが正常に初期化されました。")
 
 	// YouTubeクライアントの初期化
-	// 修正箇所: 引数を簡略化し、channelIDのみを渡します
 	youtubeClient, err := apis.NewYouTubeClient(ctx, runFlags.channelID)
 	if err != nil {
 		return fmt.Errorf("YouTube クライアントの初期化に失敗: %w", err)
 	}
 
-	// 3. ポーリングの開始とループ
+	// 3. プロセッサの初期化 (ビジネスロジックの注入)
+	processor := live_processor.NewProcessor(youtubeClient, geminiClient, runFlags.dryRun)
+
+	// 4. ポーリングの開始とループ
 
 	slog.Info("📢 ポーリングを開始します。", "間隔", runFlags.pollingInterval)
 
@@ -89,8 +92,8 @@ func runRunE(cmd *cobra.Command, args []string) error {
 	defer ticker.Stop()
 
 	// 初回ポーリング
-	// 修正箇所: apis.FetchAndProcessComments は次のファイルで定義されます
-	if err := apis.FetchAndProcessComments(ctx, youtubeClient, geminiClient, runFlags.dryRun); err != nil {
+	// 修正済み: apis.FetchAndProcessComments の代わりに processor.ProcessNextBatch を呼び出します。
+	if err := processor.ProcessNextBatch(ctx); err != nil {
 		slog.Warn("サービス起動時の初回ポーリングエラー", "error", err)
 	}
 
@@ -98,7 +101,8 @@ func runRunE(cmd *cobra.Command, args []string) error {
 		select {
 		case <-ticker.C:
 			// 定期的なポーリング
-			if err := apis.FetchAndProcessComments(ctx, youtubeClient, geminiClient, runFlags.dryRun); err != nil {
+			// 修正済み: apis.FetchAndProcessComments の代わりに processor.ProcessNextBatch を呼び出します。
+			if err := processor.ProcessNextBatch(ctx); err != nil {
 				slog.Error("ポーリングエラー", "error", err)
 			}
 		case sig := <-sigCh:
