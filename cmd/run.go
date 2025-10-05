@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -30,7 +31,9 @@ var (
 	modelName          string
 	systemInstruction  string
 	responseModalities []string
-	youtubeChannelID   string // YouTube チャンネルID (必須)
+	youtubeChannelID   string
+	// ポーリング間隔用の変数を追加
+	pollingInterval time.Duration
 )
 
 func init() {
@@ -44,6 +47,8 @@ func init() {
 
 	// --- YouTube 関連のフラグ ---
 	runCmd.Flags().StringVarP(&youtubeChannelID, "youtube-channel-id", "c", "", "YouTube Channel ID (UCC... format) for live chat posting.")
+	// ポーリング間隔フラグを追加。デフォルト値を30秒に設定。
+	runCmd.Flags().DurationVar(&pollingInterval, "polling-interval", 30*time.Second, "Polling interval for YouTube Live Chat messages (e.g., 15s, 1m).")
 
 	// --- 必須フラグの指定 ---
 	runCmd.MarkFlagRequired("api-key")
@@ -54,39 +59,45 @@ func init() {
 func runApplication(cmd *cobra.Command, args []string) {
 	ctx := context.Background()
 
-	// 1. API 設定の構築 (types.LiveAPIConfig)
-	config := types.LiveAPIConfig{
+	// 1. Gemini Live API 設定の構築
+	geminiConfig := types.LiveAPIConfig{
 		APIKey:             apiKey,
 		Model:              modelName,
 		SystemInstruction:  systemInstruction,
 		ResponseModalities: responseModalities,
 	}
 
+	// 2. パイプライン設定の構築 (ポーリング間隔を含む)
+	pipelineConfig := types.PipelineConfig{
+		PollingInterval: pollingInterval,
+	}
+
 	fmt.Println("--- Gemini Live Prompter ---")
-	fmt.Printf("Model: %s\n", config.Model)
-	fmt.Printf("System Instruction: %s\n", config.SystemInstruction)
-	fmt.Printf("Response Modalities: %v\n", config.ResponseModalities)
+	fmt.Printf("Model: %s\n", geminiConfig.Model)
+	fmt.Printf("System Instruction: %s\n", geminiConfig.SystemInstruction)
+	fmt.Printf("Response Modalities: %v\n", geminiConfig.ResponseModalities)
 	fmt.Printf("YouTube Channel ID: %s\n", youtubeChannelID)
+	fmt.Printf("YouTube Polling Interval: %v\n", pipelineConfig.PollingInterval)
 	fmt.Println("----------------------------")
 
-	// 2. Gemini Live Client の初期化
-	liveClient, err := gemini.NewLiveClient(ctx, config.APIKey)
+	// 3. Gemini Live Client の初期化
+	liveClient, err := gemini.NewLiveClient(ctx, geminiConfig.APIKey)
 	if err != nil {
 		fmt.Printf("Error initializing Gemini Client: %v\n", err)
 		os.Exit(1)
 	}
 
-	// 3. YouTube Client の初期化
+	// 4. YouTube Client の初期化
 	youtubeClient, err := youtube.NewClient(ctx, youtubeChannelID)
 	if err != nil {
 		fmt.Printf("Error initializing YouTube Client (Check credentials/token): %v\n", err)
 		os.Exit(1)
 	}
 
-	// 4. パイプラインプロセッサの初期化 (両クライアントを渡す)
-	lowLatencyProcessor := pipeline.NewLowLatencyPipeline(liveClient, youtubeClient, config)
+	// 5. パイプラインプロセッサの初期化 (両方の設定を渡す)
+	lowLatencyProcessor := pipeline.NewLowLatencyPipeline(liveClient, youtubeClient, geminiConfig, pipelineConfig)
 
-	// 5. パイプラインの実行
+	// 6. パイプラインの実行
 	if err := lowLatencyProcessor.Run(ctx); err != nil {
 		fmt.Printf("Pipeline execution failed: %v\n", err)
 		os.Exit(1)

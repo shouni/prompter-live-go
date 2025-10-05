@@ -1,6 +1,8 @@
 // internal/types/liveconfig.go
 package types
 
+import "time"
+
 // LiveAPIConfig は Gemini Live API の接続とセッション設定を保持します。
 type LiveAPIConfig struct {
 	// Gemini APIキー (認証に使用)
@@ -37,4 +39,10 @@ type LowLatencyResponse struct {
 
 	// 応答が完了したかどうか
 	Done bool
+}
+
+// PipelineConfig はパイプライン動作のための設定（ポーリング間隔など）を保持します。
+type PipelineConfig struct {
+	// YouTube Live Chatのポーリング間隔 (cmd/run.goで設定される)
+	PollingInterval time.Duration
 }
