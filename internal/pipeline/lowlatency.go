@@ -22,7 +22,9 @@ const youtubeMaxCommentLength = 500
 
 // LowLatencyPipeline は低遅延処理の中核を担い、入力と AI 応答のストリームを管理します。
 type LowLatencyPipeline struct {
-	liveClient    gemini.LiveClient
+	// gemini.LiveClient ポインタではなく、インターフェースまたは構造体自身として定義
+	// 今回はポインタを受け取るようNew関数を修正するため、型は gemini.LiveClient のままにしておきます
+	liveClient    *gemini.LiveClient // 修正: ポインタ型に変更
 	youtubeClient *youtube.Client
 
 	geminiConfig   types.LiveAPIConfig
@@ -30,9 +32,10 @@ type LowLatencyPipeline struct {
 }
 
 // NewLowLatencyPipeline は新しいパイプラインインスタンスを作成します。
-func NewLowLatencyPipeline(client gemini.LiveClient, youtubeClient *youtube.Client, geminiConfig types.LiveAPIConfig, pipelineConfig Config) *LowLatencyPipeline {
+// 💡 修正点: liveClient の型を *gemini.LiveClient ポインタに変更
+func NewLowLatencyPipeline(client *gemini.LiveClient, youtubeClient *youtube.Client, geminiConfig types.LiveAPIConfig, pipelineConfig Config) *LowLatencyPipeline {
 	return &LowLatencyPipeline{
-		liveClient:     client,
+		liveClient:     client, // ポインタを渡す
 		youtubeClient:  youtubeClient,
 		geminiConfig:   geminiConfig,
 		pipelineConfig: pipelineConfig,
