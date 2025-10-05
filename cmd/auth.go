@@ -2,6 +2,8 @@ package cmd
 
 import (
 	"context"
+	"crypto/rand"     // 追加: ランダムなバイトを生成
+	"encoding/base64" // 追加: バイトをURLセーフな文字列にエンコード
 	"fmt"
 	"net/http"
 	"os"
@@ -13,11 +15,6 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// authFlags は auth コマンドのフラグを保持するための構造体です。
-var authFlags struct {
-	port int
-}
-
 // authCmd は OAuth2 認証フローを開始し、トークンをファイルに保存します。
 var authCmd = &cobra.Command{
 	Use:   "auth",
@@ -26,40 +23,53 @@ var authCmd = &cobra.Command{
 	RunE:  authRunE,
 }
 
+var authPort int
+
 func init() {
 	rootCmd.AddCommand(authCmd)
-	// ポート番号を指定できるように新しいフラグを追加
-	authCmd.Flags().IntVar(&authFlags.port, "oauth-port", 8080, "認証コールバックサーバーがリッスンするポート番号")
+	// ポート指定フラグを追加
+	authCmd.Flags().IntVar(&authPort, "oauth-port", 8080, "OAuth認証サーバーがリッスンするポート番号")
+}
+
+// generateRandomState は暗号論的に安全なランダムな文字列を生成します。
+func generateRandomState() (string, error) {
+	b := make([]byte, 16)
+	_, err := rand.Read(b)
+	if err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
 }
 
 // authRunE は auth コマンドの実行ロジックです。
 func authRunE(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	callbackURL := fmt.Sprintf("http://localhost:%d/callback", authFlags.port)
-
 	// 1. OAuth2 Config を取得
 	config := util.GetOAuth2Config()
-	// 実行時に設定されたポートに合わせてリダイレクトURLを上書き
-	config.RedirectURL = callbackURL
 
 	// 2. 認証 URL を生成
-	state := "random-state-string"
+	// CSRF対策のため、セッションごとにユニークなランダムなstateを生成
+	state, err := generateRandomState()
+	if err != nil {
+		return fmt.Errorf("stateの生成に失敗: %w", err)
+	}
+
 	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
 	fmt.Printf("➡️ ブラウザで以下のURLを開き、YouTube へのアクセスを許可してください:\n%s\n", authURL)
 
 	// 3. ユーザー認証を待つための HTTP サーバーを起動
-	serverAddr := fmt.Sprintf(":%d", authFlags.port)
+	// サーバーを起動してからブラウザを開く
 	serverMux := http.NewServeMux()
 	server := &http.Server{
-		Addr:    serverAddr,
+		Addr:    fmt.Sprintf(":%d", authPort),
 		Handler: serverMux,
 	}
 
 	// サーバーを起動 (Go routine で実行)
 	go func() {
-		fmt.Printf("🌐 認証コールバックサーバー (%s) を起動しました。\n", callbackURL)
+		fmt.Printf("🌐 認証コールバックサーバー (http://localhost:%d/callback) を起動しました。\n", authPort)
 		if err := server.ListenAndServe(); err != http.ErrServerClosed {
 			fmt.Fprintf(os.Stderr, "❌ 認証サーバーエラー: %v\n", err)
 			os.Exit(1)
@@ -72,10 +82,10 @@ func authRunE(cmd *cobra.Command, args []string) error {
 
 	// 5. コールバックハンドラーの設定
 	serverMux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		// State の検証
+		// State の検証 (CSRF対策)
 		if r.FormValue("state") != state {
 			http.Error(w, "State mismatch", http.StatusBadRequest)
-			errChan <- fmt.Errorf("state mismatch")
+			errChan <- fmt.Errorf("state mismatch: 予想されたstate=%s, 受信したstate=%s", state, r.FormValue("state"))
 			return
 		}
 
@@ -110,7 +120,7 @@ func authRunE(cmd *cobra.Command, args []string) error {
 		}()
 	})
 
-	// 6. ブラウザを開く
+	// 6. ブラウザを開く (macOS/Linux/Windowsに対応)
 	fmt.Println("🚀 ブラウザを開いています...")
 	util.OpenBrowser(authURL)
 
@@ -124,8 +134,12 @@ func authRunE(cmd *cobra.Command, args []string) error {
 		fmt.Printf("\n✅ 認証トークンを '%s' に保存しました。サービスを実行できます。\n", util.TokenPath)
 		return nil
 	case err := <-errChan:
+		// サーバーを確実にシャットダウン
+		server.Shutdown(ctx)
 		return err
 	case <-ctx.Done():
+		// サーバーを確実にシャットダウン
+		server.Shutdown(ctx)
 		return fmt.Errorf("認証プロセスがキャンセルされました")
 	}
 }
