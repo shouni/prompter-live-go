@@ -37,3 +37,4 @@ gemini_reviewer	prompter_live
 /.env
 /workspace.xml
 /config/token.json
+/internal/pipeline/bin/prompter_live
