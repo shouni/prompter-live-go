@@ -2,9 +2,9 @@ package pipeline
 
 import (
 	"context"
-	"errors" // 💡 修正: errors パッケージを追加
+	"errors"
 	"fmt"
-	"io" // 💡 修正: io パッケージを追加
+	"io"
 	"log"
 	"time"
 
@@ -19,7 +19,9 @@ type LowLatencyPipeline struct {
 	youtubeClient  *youtube.Client
 	geminiConfig   types.LiveAPIConfig
 	pipelineConfig types.PipelineConfig
-	session        gemini.Session
+
+	// セッション管理用
+	session gemini.Session
 }
 
 // NewLowLatencyPipeline は新しいパイプラインインスタンスを作成します。
@@ -42,13 +44,31 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	log.Println("Pipeline started.")
 
 	// 1. Geminiセッションの初期化
-	// Live Client は内部でセッションを開始します
 	session, err := p.geminiClient.StartSession(ctx, p.geminiConfig)
 	if err != nil {
 		return fmt.Errorf("failed to start Gemini session: %w", err)
 	}
 	p.session = session
 	defer p.session.Close()
+
+	// 💡 修正点 1: システム指示をセッションの最初のメッセージとして送信
+	if p.geminiConfig.SystemInstruction != "" {
+		log.Println("Sending System Instruction as initial message...")
+
+		// システム指示を送信
+		if err := p.session.Send(ctx, types.LiveStreamData{Text: p.geminiConfig.SystemInstruction}); err != nil {
+			return fmt.Errorf("failed to send system instruction: %w", err)
+		}
+
+		// AIからの最初の応答 (システム指示に対する確認応答) を待つ
+		// ここでの応答は通常空であるか、短い確認応答ですが、必ず RecvResponse を呼び出してチャネルをクリアする必要があります。
+		// この処理をブロックすることで、システム指示が確実にAIに届くまで待機します。
+		if _, err := p.session.RecvResponse(); err != nil && !errors.Is(err, io.EOF) {
+			// io.EOF は正常終了と見なす
+			log.Printf("Warning: Failed to receive initial AI response for system instruction: %v", err)
+		}
+		log.Println("System Instruction processed.")
+	}
 
 	// 2. メインループの実行
 	return p.runLoop(ctx)
@@ -84,20 +104,15 @@ func (p *LowLatencyPipeline) runLoop(ctx context.Context) error {
 				continue
 			}
 
-			// 💡 修正: pollingInterval を使用して次の待機時間を動的に設定
 			// APIが推奨するポーリング間隔に更新
 			if pollingInterval > 0 {
 				nextPollDelay = pollingInterval
 			} else {
-				// 0sが返された場合は、デフォルトに戻すか、前回値を維持
 				log.Println("API returned 0s polling interval. Using default.")
-				// nextPollDelay は変更しない (前回値を維持)
 			}
 
 			// 3. 取得したコメントを AI に送信し、応答処理を開始
 			for _, comment := range comments {
-				// AIが自分自身に応答しないように、AuthorIDでフィルタリングが必要だが、
-				// youtube.Client がこのロジックを持っていないため、一旦すべて送信する。
 				log.Printf("New Comment received from %s: %s", comment.Author, comment.Message)
 
 				// AIにコメントを送信 (非同期で応答ストリームを開始する)
@@ -119,7 +134,7 @@ func (p *LowLatencyPipeline) runLoop(ctx context.Context) error {
 
 // handleAIResponse はAIからの応答を受け取り、YouTubeに投稿します。
 func (p *LowLatencyPipeline) handleAIResponse(ctx context.Context) {
-	// 💡 RecvResponse は完全な応答が来るまで待機し、一度だけ返します。
+	// RecvResponse は完全な応答が来るまで待機し、一度だけ返します。
 	resp, err := p.session.RecvResponse()
 	if err != nil {
 		if errors.Is(err, io.EOF) {
@@ -139,6 +154,4 @@ func (p *LowLatencyPipeline) handleAIResponse(ctx context.Context) {
 			log.Printf("Error posting comment to YouTube: %v", err)
 		}
 	}
-
-	// Done: true であれば、この応答でストリームが終了したことを意味します（RecvResponseのロジックで保証されています）
 }

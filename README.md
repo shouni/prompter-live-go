@@ -1,7 +1,7 @@
 # 🤖 Prompter Live Go
 
 [![Language](https://img.shields.io/badge/Language-Go-blue)](https://golang.org/)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/shouni/git-gemini-reviewer-go)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go%20Version-1.21%2B-blue)](https://golang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 🚀 概要 (About) - エンゲージメントを掴み、サイト誘導を加速するAIプロモーションパートナー
@@ -12,7 +12,7 @@
 
 これにより、視聴者は「宣伝」と感じることなく自然に情報に触れ、**会話の流れでサイトへ誘導**されます。単なるファン対応の効率化に留まらず、YouTubeという大規模なプラットフォームにおける**プロモーション効果とコンバージョン**を飛躍的に高める、戦略的な AI ソリューションです。
 
------
+---
 
 ### 🌸 導入がもたらすポジティブな変化
 
@@ -20,10 +20,10 @@
  | :--- | :--- | :--- | 
 | **リアルタイムなファン対応** | コメントへの即時応答で、ユーザー体験が向上します。特に**Live API**により応答速度が飛躍的に向上します。 | **エンゲージメント**が高まり、動画やチャンネルへの再訪問率が向上します。 | 
 | **プロモーション導線の自動構築** | AIが会話の流れを読み取り、**自社サイトへの誘導リンク**やキャンペーン情報を自然にコメントに組み込みます。 | 従来の広告と異なり、**会話に溶け込んだ形でコンバージョン**を促し、サイト誘導率を向上させます。 | 
-| **キャラクターの一貫性維持** | AIが厳密なプロンプトに従い、常にブランド設定を守って応答します。 | ブランドイメージを毀損することなく、**信頼できる情報源**としてサイトへの信頼感を高めます。 | 
+| **キャラクターの一貫性維持** | AIが厳密なプロンプト（System Instruction）に従い、常にブランド設定を守って応答します。 | ブランドイメージを毀損することなく、**信頼できる情報源**としてサイトへの信頼感を高めます。 | 
 | **データに基づいた効果測定** | どの応答やプロモーションコメントが反応を得たかを分析できます。 | **YouTubeプロモーション戦略のPDCAサイクル**を回すための貴重なデータを自動で収集できます。 | 
 
------
+---
 
 ## ✨ 技術スタック (Technology Stack)
 
@@ -31,11 +31,11 @@
  | :--- | :--- | :--- | 
 | **言語** | **Go (Golang)** | ツールの開発言語。リアルタイム応答に必要な高い並行処理性能を提供します。 | 
 | **CLI フレームワーク** | **Cobra** | コマンドライン引数や認証フローを管理するための構造化を提供します。 | 
-| **AI モデル** | **Google Gemini Live API** | 視聴者のコメント分析、キャラクター設定に基づいた応答テキストの**リアルタイムストリーミング生成**に使用します。 |
+| **AI モデル** | **Google Gemini Live API** | 視聴者のコメント分析、キャラクター設定に基づいた応答テキストの**低遅延ストリーミング生成**に使用します。 |
 | **YouTube 連携** | **Google OAuth 2.0 / YouTube Data API v3** | チャンネル所有者としての認証（OAuth）、アクティブなライブチャット ID の取得、**ライブチャットのポーリング**、AI応答コメントのポストに使用します。
 | **リアルタイム処理** | **Go Goroutine & Channel** | コメントの取得、AI処理、APIポストを並行して実行し、低遅延での応答を実現します。 | 
 
------
+---
 
 ## 🛠️ 事前準備と環境設定
 
@@ -46,7 +46,7 @@
 git clone git@github.com:shouni/prompter-live-go.git
 cd prompter-live-go
 
-# 依存関係を整理 (Live API への移行に伴うクリーンアップ)
+# 依存関係を整理
 go mod tidy
 
 # 実行ファイルを bin/ ディレクトリに生成
@@ -60,8 +60,9 @@ Goアプリケーションは、以下の変数名で認証情報を読み込み
 #### macOS / Linux (bash/zsh)
 
 ```bash
-# 💡 注意: YouTube のクライアントID/シークレットは 'YT_' で始まります
+# Gemini API Key（AIとの接続に必要）
 export GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+# YouTube (GCP) クライアント認証情報
 export YT_CLIENT_ID="YOUR_GCP_CLIENT_ID"
 export YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 ```
@@ -69,8 +70,9 @@ export YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 #### Windows (PowerShell)
 
 ```powershell
-# 💡 注意: YouTube のクライアントID/シークレットは 'YT_' で始まります
+# Gemini API Key（AIとの接続に必要）
 $env:GEMINI_API_KEY="YOUR_GEMINI_API_KEY"
+# YouTube (GCP) クライアント認証情報
 $env:YT_CLIENT_ID="YOUR_GCP_CLIENT_ID"
 $env:YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
 ```
@@ -89,9 +91,9 @@ $env:YT_CLIENT_SECRET="YOUR_GCP_CLIENT_SECRET"
         - `http://localhost:8080/callback`
         - `http://localhost:8081/callback` (ポート競合時の予備)
 
-### 4\. プロンプトファイルの準備（現在の実装ではコマンドラインで指定）
+### 4\. プロンプト設定（System Instruction）
 
-AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruction`) で直接渡す方式です。長い設定はMarkdownファイルなどに記述し、引数として渡すことを推奨します。
+AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruction`) で直接渡す方式です。この設定は、セッション開始時に**最初のメッセージとして**AIに送信され、ペルソナを確立します。長い設定はMarkdownファイルなどに記述し、引数として渡すことを推奨します。
 
 -----
 
@@ -115,12 +117,11 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 
 認証が完了したら、Gemini Live API と YouTube Live Chat への接続を確立し、自動応答を開始します。
 
-このコマンドは、**YouTubeチャンネルID**と**Gemini APIキー**を必須とします。
+このコマンドは、**YouTubeチャンネルID**を必須とします。`--api-key` が省略された場合、`GEMINI_API_KEY` 環境変数が使用されます。
 
 ```bash
 # Live APIに接続し、AIによる自動応答とコメント投稿を開始
 ./bin/prompter_live run \
-  -k "YOUR_GEMINI_API_KEY" \
   -c "UCxxxxxxxxxxxxxxxxxxxxxxxxxx" \
   -m "gemini-2.5-flash" \
   -i "あなたは視聴者コメントを代行するAIです。フレンドリーかつ簡潔に返答してください。"
@@ -130,11 +131,11 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 
 | フラグ | 説明 | デフォルト値 |
 | :--- | :--- | :--- |
-| `-k`, `--api-key` | **Gemini API Key** | `GEMINI_API_KEY` 環境変数 |
+| `-k`, `--api-key` | Gemini API Key (省略可) | `GEMINI_API_KEY` 環境変数 |
 | `-c`, `--youtube-channel-id` | **監視対象の YouTube チャンネル ID (必須)** | **なし** |
 | `-m`, `--model` | 使用する Gemini モデル名（Live API対応モデル推奨） | `gemini-2.5-flash` |
 | `-i`, `--instruction` | AIの応答ルールやキャラクター設定（System Instruction） | **なし** |
-| `-r`, `--modalities` | AIからの応答として期待するデータ形式 | `TEXT` |
+| `-r`, `--modalities` | AIからの応答として期待するデータ形式（現在のパイプラインではTEXTのみを扱います） | `TEXT` |
 
 > **重要**: `run` コマンドは、指定されたチャンネルが**現在アクティブなライブ配信を行っている場合のみ** Live Chat ID を取得し、コメントの投稿が可能です。
 
@@ -143,9 +144,9 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 ### ⚠️ 動作原理に関する重要な注意点
 
 * **Gemini Live API**: 非常に低遅延なリアルタイム対話のための機能です。
-
 * **オーディオ入力**: 現在のパイプラインは**ダミーのオーディオデータ**を送信することで Gemini Live API との接続をテストしています。実際の利用には、マイク入力や音声処理ロジックの統合が必要です。
-
+* **システム指示の適用に関する制限 (Critical)**: Go SDKの互換性問題により、`System Instruction` はセッション開始時に**最初のユーザーメッセージとして**AIに送信されています。この回避策により、AIは設定を**ユーザーからの発言**と誤認し、**応答のペルソナや一貫性が損なわれるリスク**があります。より確実な方法が確立されるまでの**機能上の制限**としてご了承ください。
+* **プロモーションロジック**: この「会話の流れを読む」ロジックは、内部パイプラインで実行され、視聴者のコメントに含まれる**特定のプロモーションキーワードを検出**した場合に、AI応答トリガーとして優先的に処理されます。
 * **YouTube API クォータ**: YouTube Live Chat ID の取得やコメントの投稿は API クォータを消費します。
 
 -----
@@ -153,3 +154,5 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 ### 📜 ライセンス (License)
 
 このプロジェクトは [MIT License](https://opensource.org/licenses/MIT) の下で公開されています。
+
+
