@@ -1,30 +1,29 @@
+// internal/types/liveconfig.go
 package types
-
-import "google.golang.org/genai/types"
 
 // LiveAPIConfig は Gemini Live API の接続とセッション設定を保持します。
 type LiveAPIConfig struct {
 	// Gemini APIキー (認証に使用)
 	APIKey string
 
-	// Live APIで使用するモデル名 (例: gemini-live-2.5-flash)
+	// Live APIで使用するモデル名
 	Model string
 
-	// 応答のキャラクター設定や指示を記述したプロンプト (SystemInstruction)
-	// liveconfig.go 側で文字列として保持
+	// 応答のキャラクター設定や指示を記述したプロンプト
 	SystemInstruction string
 
-	// Live APIで受け取りたい出力形式 (例: TEXT, AUDIO)
-	// genai/types.ResponseModality のスライス
-	ResponseModalities []types.ResponseModality
+	// 応答の出力形式 ("TEXT" や "AUDIO") を文字列スライスで定義します。
+	// SDKの型ではなく、標準の文字列で扱うことで、このファイルからSDKへの依存を排除します。
+	ResponseModalities []string
 
-	// ツール(Function Calling)の定義。現在は空でOKですが、将来的な拡張に備えます。
-	Tools []*types.Tool
+	// ツール(Function Calling)の定義は、一旦 nil や空のインターフェースで保持します。
+	// Liveクライアント内でSDKの型に変換します。
+	Tools interface{}
 }
 
 // LiveStreamData は Live API に送信するマルチモーダルデータ（音声または映像）の形式を定義します。
 type LiveStreamData struct {
-	// データの種類 (audio, video, text)
+	// データの種類 (audio/pcm;rate=16000, image/jpeg など)
 	MimeType string
 
 	// データの生バイト列

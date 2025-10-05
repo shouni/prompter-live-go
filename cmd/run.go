@@ -3,116 +3,82 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"log/slog"
 	"os"
-	"os/signal"
-	"syscall"
-	"time"
-
-	"prompter-live-go/internal/apis"
-	"prompter-live-go/internal/services/live_processor"
-	"prompter-live-go/internal/util"
 
 	"github.com/spf13/cobra"
+
+	// 必須: LiveClient の初期化に使用
+	"prompter-live-go/internal/gemini"
+	// 必須: パイプラインの定義に使用
+	"prompter-live-go/internal/pipeline"
+	// 必須: 共通の型定義
+	"prompter-live-go/internal/types"
 )
 
-// runFlags は run コマンドのフラグを保持するための構造体です。
-var runFlags struct {
-	channelID       string
-	pollingInterval time.Duration
-	promptFile      string
-	dryRun          bool
-}
-
-// runCmd は AI自動応答サービスを開始するためのコマンドです。
+// runCmd はアプリケーションを起動するためのコマンド定義です。
 var runCmd = &cobra.Command{
 	Use:   "run",
-	Short: "YouTubeライブコメント監視とAI自動応答サービスを開始します。",
-	Long:  `指定されたチャンネルのコメントを定期的にポーリングし、Gemini AIが生成した応答を自動で投稿します。`,
-	RunE:  runRunE,
+	Short: "Start the Gemini Live API chat application.",
+	Run:   runApplication,
 }
+
+// Live API の設定を保持するグローバル変数
+var (
+	apiKey             string
+	modelName          string
+	systemInstruction  string
+	responseModalities []string
+)
 
 func init() {
 	rootCmd.AddCommand(runCmd)
-	runCmd.Flags().StringVar(&runFlags.channelID, "channel-id", "", "監視対象のYouTubeチャンネルID (必須)")
-	runCmd.MarkFlagRequired("channel-id")
 
-	runCmd.Flags().DurationVar(&runFlags.pollingInterval, "polling-interval", 30*time.Second, "コメントをチェックする間隔 (例: 15s, 30s)")
-	runCmd.Flags().StringVar(&runFlags.promptFile, "prompt-file", "", "AIのキャラクター設定と応答指示が書かれたプロンプトファイルのパス (必須)")
-	runCmd.MarkFlagRequired("prompt-file")
+	// コマンドライン引数の設定
+	runCmd.Flags().StringVarP(&apiKey, "api-key", "k", os.Getenv("GEMINI_API_KEY"), "Gemini API key (or set GEMINI_API_KEY env var)")
+	runCmd.Flags().StringVarP(&modelName, "model", "m", "gemini-2.5-flash", "Model name to use for the live session")
+	runCmd.Flags().StringVarP(&systemInstruction, "instruction", "i", "", "System instruction (prompt) for the AI personality")
+	runCmd.Flags().StringSliceVarP(&responseModalities, "modalities", "r", []string{"TEXT"}, "Comma-separated list of response modalities (e.g., TEXT, AUDIO)")
 
-	runCmd.Flags().BoolVar(&runFlags.dryRun, "dry-run", false, "実際のコメント投稿をスキップし、応答結果のみを表示する (テスト用)")
+	// APIキーは必須
+	runCmd.MarkFlagRequired("api-key")
 }
 
-func runRunE(cmd *cobra.Command, args []string) error {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+// runApplication はアプリケーションのメイン実行ロジックです。
+func runApplication(cmd *cobra.Command, args []string) {
+	ctx := context.Background()
 
-	// 1. 環境設定の表示と検証
-	fmt.Println("--- Prompter Live Go: 自動応答サービス開始 ---")
-	fmt.Printf("✅ チャンネルID: %s\n", runFlags.channelID)
-	fmt.Printf("✅ ポーリング間隔: %s\n", runFlags.pollingInterval)
-	fmt.Printf("✅ プロンプトファイル: %s\n", runFlags.promptFile)
-	if runFlags.dryRun {
-		fmt.Println("⚠️ ドライランモード: コメントは投稿されず、応答結果のみ表示されます。")
+	// 1. API 設定の構築 (types.LiveAPIConfig)
+	config := types.LiveAPIConfig{
+		APIKey:             apiKey,
+		Model:              modelName,
+		SystemInstruction:  systemInstruction,
+		ResponseModalities: responseModalities,
+		// Tools: nil, // 今回は未実装
 	}
 
-	// 2. クライアントの初期化
+	fmt.Println("--- Gemini Live Prompter ---")
+	fmt.Printf("Model: %s\n", config.Model)
+	fmt.Printf("System Instruction: %s\n", config.SystemInstruction)
+	fmt.Printf("Response Modalities: %v\n", config.ResponseModalities)
+	fmt.Println("----------------------------")
 
-	// Geminiクライアントの初期化
-	prompt, err := util.LoadPromptFile(runFlags.promptFile)
+	// 2. Gemini Live Client の初期化 (修正済み)
+	// apis.NewGeminiClient の代わりに gemini.NewLiveClient を使用
+	liveClient, err := gemini.NewLiveClient(ctx, config.APIKey)
 	if err != nil {
-		return fmt.Errorf("プロンプトファイルの読み込みに失敗: %w", err)
-	}
-	geminiClient, err := apis.NewGeminiClient(ctx, prompt)
-	if err != nil {
-		return fmt.Errorf("Gemini クライアントの初期化に失敗: %w", err)
-	}
-	slog.Info("Gemini API クライアントが正常に初期化されました。")
-
-	// YouTubeクライアントの初期化
-	youtubeClient, err := apis.NewYouTubeClient(ctx, runFlags.channelID)
-	if err != nil {
-		return fmt.Errorf("YouTube クライアントの初期化に失敗: %w", err)
+		fmt.Printf("Error initializing Gemini Client: %v\n", err)
+		os.Exit(1)
 	}
 
-	// 3. プロセッサの初期化 (ビジネスロジックの注入)
-	processor := live_processor.NewProcessor(youtubeClient, geminiClient, runFlags.dryRun)
+	// 3. パイプラインプロセッサの初期化 (修正済み)
+	// live_processor の代わりに pipeline.NewLowLatencyPipeline を使用
+	lowLatencyProcessor := pipeline.NewLowLatencyPipeline(liveClient, config)
 
-	// 4. ポーリングの開始とループ
-
-	slog.Info("📢 ポーリングを開始します。", "間隔", runFlags.pollingInterval)
-
-	// OSシグナルハンドリング (Ctrl+Cなどで終了できるように)
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
-
-	// メインのポーリングループ
-	ticker := time.NewTicker(runFlags.pollingInterval)
-	defer ticker.Stop()
-
-	// 初回ポーリング
-	// 修正済み: apis.FetchAndProcessComments の代わりに processor.ProcessNextBatch を呼び出します。
-	if err := processor.ProcessNextBatch(ctx); err != nil {
-		slog.Warn("サービス起動時の初回ポーリングエラー", "error", err)
+	// 4. パイプラインの実行
+	if err := lowLatencyProcessor.Run(ctx); err != nil {
+		fmt.Printf("Pipeline execution failed: %v\n", err)
+		os.Exit(1)
 	}
 
-	for {
-		select {
-		case <-ticker.C:
-			// 定期的なポーリング
-			// 修正済み: apis.FetchAndProcessComments の代わりに processor.ProcessNextBatch を呼び出します。
-			if err := processor.ProcessNextBatch(ctx); err != nil {
-				slog.Error("ポーリングエラー", "error", err)
-			}
-		case sig := <-sigCh:
-			// 終了シグナル受信
-			slog.Info("サービスを終了します", "signal", sig.String())
-			return nil
-		case <-ctx.Done():
-			// コンテキストキャンセルによる終了
-			slog.Info("サービスがキャンセルされました")
-			return nil
-		}
-	}
+	fmt.Println("Application finished successfully.")
 }
