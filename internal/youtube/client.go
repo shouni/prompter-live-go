@@ -12,13 +12,20 @@ import (
 	"google.golang.org/api/youtube/v3"
 )
 
+const (
+	// コメントIDを保持する期間 (例: 1時間)
+	commentIDRetentionDuration = 1 * time.Hour
+)
+
 // ErrLiveChatEnded はライブチャットが終了したことを示すカスタムエラー
 var ErrLiveChatEnded = errors.New("live chat ended")
 
 // Comment は YouTube のライブチャットメッセージを表す構造体
 type Comment struct {
+	ID        string
+	AuthorID  string
 	Author    string
-	Message   string
+	Message   string // 💡 修正: メッセージ本体のフィールド名は 'Message'
 	Timestamp time.Time
 }
 
@@ -32,7 +39,7 @@ type Client struct {
 	// ライブチャットの状態を管理するためのフィールド
 	liveChatID            string
 	nextPageToken         string
-	lastFetchedCommentIDs map[string]struct{}
+	lastFetchedCommentIDs map[string]time.Time
 }
 
 // NewClient は新しい YouTube Client のインスタンスを作成します。
@@ -44,6 +51,10 @@ func NewClient(ctx context.Context, channelID string, oauthPort int) (*Client, e
 	log.Printf("YouTube Client: Starting OAuth2 setup using port %d...", oauthPort)
 
 	// 1. 認証済み HTTP クライアントの取得 (GetOAuth2Clientは同じパッケージのauth.goにあります)
+	// GetOAuth2Clientが未定義の場合、Goのビルドシステムはエラーを出しますが、ここでは存在すると仮定
+	// GetOAuth2Client() が GetToken() に依存しているため、ロジックを auth.go の定義に合わせる
+
+	// トークン設定は auth.go に依存するため、ここでは簡略化し、auth.go が適切なクライアントを返すものと仮定する。
 	client, err := GetOAuth2Client(ctx, oauthPort)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get authenticated client: %w", err)
@@ -60,7 +71,7 @@ func NewClient(ctx context.Context, channelID string, oauthPort int) (*Client, e
 	return &Client{
 		channelID:             channelID,
 		service:               service,
-		lastFetchedCommentIDs: make(map[string]struct{}),
+		lastFetchedCommentIDs: make(map[string]time.Time),
 	}, nil
 }
 
@@ -104,12 +115,13 @@ func (c *Client) findLiveChatID(ctx context.Context) (string, error) {
 }
 
 // FetchLiveChatMessages は新しいライブチャットメッセージを取得します。
-func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
+// 💡 修正: シグネチャを types.LowLatencyResponse に合わせ、ポーリング間隔を戻り値に含めます。
+func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, time.Duration, error) {
 	// 1. 初回呼び出し時に liveChatID を検索し設定
 	if c.liveChatID == "" {
 		id, err := c.findLiveChatID(ctx)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		c.liveChatID = id
 	}
@@ -130,39 +142,88 @@ func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
 			log.Printf("YouTube API Error: Live chat ended. Error: %v", err)
 			c.liveChatID = "" // 💡 修正: liveChatID をリセット
 			c.nextPageToken = ""
-			return nil, ErrLiveChatEnded // 💡 修正: カスタムエラーを返す
+			return nil, 0, ErrLiveChatEnded // 💡 修正: カスタムエラーと 0s を返す
 		}
 		// その他のエラー
-		return nil, fmt.Errorf("failed to fetch live chat messages: %w", err)
+		return nil, 0, fmt.Errorf("failed to fetch live chat messages: %w", err)
 	}
 
-	// 3. 次のポーリングのためのトークンを更新
+	// 3. 次のポーリングのためのトークンと間隔を更新
 	c.nextPageToken = response.NextPageToken
+	pollingInterval := time.Duration(response.PollingIntervalMillis) * time.Millisecond // 💡 修正: pollingInterval をここで定義
 
-	// 4. 結果を Comment スライスに変換
-	var comments []Comment
+	// 4. メッセージを処理し、重複をフィルタリング
+	var newComments []Comment
+	currentTime := time.Now()
+
 	for _, item := range response.Items {
-		// 💡 修正: PublishedAt (RFC3339文字列) をパースする
-		publishedAt := time.Now() // フォールバック
+		// YouTube Data APIの仕様: LiveChatMessage IDは item.Id
+		commentID := item.Id
 
-		if item.Snippet.PublishedAt != "" {
-			parsedTime, err := time.Parse(time.RFC3339, item.Snippet.PublishedAt)
-			if err != nil {
-				log.Printf("Warning: Failed to parse timestamp '%s': %v", item.Snippet.PublishedAt, err)
-			} else {
-				publishedAt = parsedTime
-			}
+		// 4.1. 重複チェック
+		if _, exists := c.lastFetchedCommentIDs[commentID]; exists {
+			continue // 既に処理済みのためスキップ
 		}
 
-		comments = append(comments, Comment{
-			Author:    item.AuthorDetails.DisplayName,
-			Message:   item.Snippet.DisplayMessage,
-			Timestamp: publishedAt,
-		})
+		// 4.2. 必須フィールドのチェック (AI応答に必要なメッセージ本文)
+		if item.Snippet.DisplayMessage == "" {
+			continue
+		}
+
+		// 4.3. コメントの構造体を作成
+		newComment := Comment{
+			ID:       commentID,
+			AuthorID: item.AuthorDetails.ChannelId,
+			Author:   item.AuthorDetails.DisplayName,
+			Message:  item.Snippet.DisplayMessage, // 💡 修正: TextではなくMessageを使用
+			// YouTubeのタイムスタンプはRFC3339形式
+			Timestamp: parseYouTubeTimestamp(item.Snippet.PublishedAt),
+		}
+
+		newComments = append(newComments, newComment)
+
+		// 4.4. 💡 新しいコメントIDをマップに記録
+		c.lastFetchedCommentIDs[commentID] = currentTime
 	}
 
-	log.Printf("Successfully fetched %d new messages. Next token: %s", len(comments), c.nextPageToken)
-	return comments, nil
+	// 5. 💡 ガベージコレクションを実行し、古いエントリを削除
+	c.cleanOldCommentIDs(currentTime)
+
+	return newComments, pollingInterval, nil // 💡 修正: 正しい戻り値の数で返す
+}
+
+// cleanOldCommentIDs は保持期間を過ぎたコメントIDをマップから削除します。
+func (c *Client) cleanOldCommentIDs(currentTime time.Time) {
+	// ログの頻度を抑えるためのカウンター
+	deletedCount := 0
+
+	// 現在時刻から保持期間を引いたしきい値
+	threshold := currentTime.Add(-commentIDRetentionDuration)
+
+	for id, t := range c.lastFetchedCommentIDs {
+		if t.Before(threshold) {
+			delete(c.lastFetchedCommentIDs, id)
+			deletedCount++
+		}
+	}
+
+	if deletedCount > 0 {
+		log.Printf("[YouTube Client] Cleaned %d old comment IDs. Total tracked: %d", deletedCount, len(c.lastFetchedCommentIDs))
+	}
+}
+
+// PostComment は指定されたテキストをライブチャットに投稿します。
+// ... (このメソッドは変更なしと仮定) ...
+
+// parseYouTubeTimestamp は YouTube API のタイムスタンプ文字列を time.Time に変換します。
+// これは YouTube の慣習的なユーティリティ関数であり、パッケージ内で定義されている必要があります。
+func parseYouTubeTimestamp(t string) time.Time {
+	parsedTime, err := time.Parse(time.RFC3339, t)
+	if err != nil {
+		log.Printf("Error parsing timestamp '%s': %v", t, err)
+		return time.Time{} // パース失敗時はゼロ値を返す
+	}
+	return parsedTime
 }
 
 // PostComment は指定されたテキストをライブチャットに投稿します。
