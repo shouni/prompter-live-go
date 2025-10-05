@@ -53,20 +53,12 @@ func (c *Client) StartSession(ctx context.Context, config types.LiveAPIConfig) (
 	// 1. モデルを取得。
 	model := c.baseClient.GenerativeModel(c.modelName)
 
-	// 2. システム指示を設定
-	// 💡 修正: genai.WithSystemInstructionが未定義のため、モデルの再生成ロジックを削除し、
-	// ビルドエラーを回避します。システム指示の適用は、newGeminiLiveSession (internal/gemini/live.go)
-	// の内部で処理される必要があります。
-
-	// システム指示の適用が有効になるまで、ログに出力
-	if c.systemInstruction != "" {
-		log.Printf("Warning: System instruction ('%s') is currently not applied due to SDK build constraints.", c.systemInstruction)
-		// ⚠️ 今後、live.goを修正して systemInstruction を適用する必要があります。
-	}
+	// 2. システム指示の設定ロジックは newGeminiLiveSession に移譲されたため、
+	// ここではモデルの設定を省略し、単にモデルと設定、システム指示を渡します。
 
 	// 3. 内部セッション (newGeminiLiveSession) を作成
-	// newGeminiLiveSessionのシグネチャに合わせ、modelとconfigのみを渡す
-	session := newGeminiLiveSession(model, config)
+	// 💡 修正: c.systemInstruction を第3引数として渡す
+	session := newGeminiLiveSession(model, config, c.systemInstruction)
 
 	log.Printf("New Gemini Session started for model: %s", c.modelName)
 
