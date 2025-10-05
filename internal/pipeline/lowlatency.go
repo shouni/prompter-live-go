@@ -22,9 +22,8 @@ const youtubeMaxCommentLength = 500
 
 // LowLatencyPipeline は低遅延処理の中核を担い、入力と AI 応答のストリームを管理します。
 type LowLatencyPipeline struct {
-	// gemini.LiveClient ポインタではなく、インターフェースまたは構造体自身として定義
-	// 今回はポインタを受け取るようNew関数を修正するため、型は gemini.LiveClient のままにしておきます
-	liveClient    *gemini.LiveClient // 修正: ポインタ型に変更
+	// 💡 修正: 未定義の gemini.LiveClient ではなく、定義済みの gemini.LiveSession インターフェースを使用
+	liveClient    gemini.LiveSession
 	youtubeClient *youtube.Client
 
 	geminiConfig   types.LiveAPIConfig
@@ -32,10 +31,10 @@ type LowLatencyPipeline struct {
 }
 
 // NewLowLatencyPipeline は新しいパイプラインインスタンスを作成します。
-// 💡 修正点: liveClient の型を *gemini.LiveClient ポインタに変更
-func NewLowLatencyPipeline(client *gemini.LiveClient, youtubeClient *youtube.Client, geminiConfig types.LiveAPIConfig, pipelineConfig Config) *LowLatencyPipeline {
+// 💡 修正: liveClient の型を gemini.LiveSession に変更
+func NewLowLatencyPipeline(client gemini.LiveSession, youtubeClient *youtube.Client, geminiConfig types.LiveAPIConfig, pipelineConfig Config) *LowLatencyPipeline {
 	return &LowLatencyPipeline{
-		liveClient:     client, // ポインタを渡す
+		liveClient:     client, // インターフェースを渡す
 		youtubeClient:  youtubeClient,
 		geminiConfig:   geminiConfig,
 		pipelineConfig: pipelineConfig,
@@ -46,10 +45,9 @@ func NewLowLatencyPipeline(client *gemini.LiveClient, youtubeClient *youtube.Cli
 func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	log.Println("Starting Live API connection...")
 
-	session, err := p.liveClient.Connect(ctx, p.geminiConfig)
-	if err != nil {
-		return fmt.Errorf("failed to connect to Live API: %w", err)
-	}
+	// LiveSession はすでに NewClient で確立されているため、Connect 呼び出しは不要
+	session := p.liveClient
+
 	defer session.Close()
 
 	responseChan := make(chan *types.LowLatencyResponse)
@@ -65,12 +63,13 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 			// リアルタイム応答の処理
 			if resp.Done {
 				log.Println("AI response stream finished.")
-				return nil
+				// ストリーム終了後も、パイプラインはコメントのポーリングを継続
 			}
 
-			if resp.Text != "" {
+			// 💡 修正: resp.Text から resp.ResponseText に変更 (72行目/74行目)
+			if resp.ResponseText != "" {
 				// 応答テキストをYouTubeの文字数制限に合わせてサニタイズ
-				safeText := sanitizeMessage(resp.Text)
+				safeText := sanitizeMessage(resp.ResponseText)
 				log.Printf("Received AI Text (Sanitized to %d chars): %s", utf8.RuneCountInString(safeText), safeText)
 
 				// AI応答をYouTubeに投稿する (非同期で実行)
@@ -199,11 +198,12 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 
 				for _, comment := range comments {
 					inputData := types.LiveStreamData{
-						MimeType: "text/plain",
-						Data:     []byte(comment.Message),
+						// 💡 修正: LiveStreamData の定義に合わせて Text フィールドのみを使用
+						Text: comment.Message,
 					}
 
-					if err := session.Send(inputData); err != nil {
+					// 💡 修正: session.Send() に context.Context を追加 (205行目)
+					if err := session.Send(ctx, inputData); err != nil {
 						errorChan <- fmt.Errorf("error sending comment to Gemini Live API: %w", err)
 						return
 					}

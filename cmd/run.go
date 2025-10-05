@@ -25,21 +25,13 @@ var runCmd = &cobra.Command{
 	RunE: runApplication,
 }
 
-var (
-	apiKey             string
-	modelName          string
-	systemInstruction  string
-	responseModalities []string
-	youtubeChannelID   string
-	pollingInterval    time.Duration
-	// 認証ポート用の変数を追加
-	oauthPort int
-)
+// 💡 修正： cmd/root.go との重複宣言エラーを避けるため、run.go から変数宣言を完全に削除します。
 
 func init() {
 	rootCmd.AddCommand(runCmd)
 
 	// --- Gemini Live API 関連のフラグ ---
+	// これらのフラグは cmd/root.go で定義された変数に値をバインドします。
 	runCmd.Flags().StringVarP(&apiKey, "api-key", "k", os.Getenv("GEMINI_API_KEY"), "Gemini API key (or set GEMINI_API_KEY env var)")
 	runCmd.Flags().StringVarP(&modelName, "model", "m", "gemini-2.5-flash", "Model name to use for the live session")
 	runCmd.Flags().StringVarP(&systemInstruction, "instruction", "i", "", "System instruction (prompt) for the AI personality")
@@ -55,6 +47,8 @@ func init() {
 }
 
 // runApplication はアプリケーションのメイン実行ロジックです。
+// この関数は runCmd の実行ロジックとして cmd/run.go に存在するのが正しいです。
+// cmd/root.go に重複定義がある場合、そちらを削除する必要があります。
 func runApplication(cmd *cobra.Command, args []string) error {
 	// APIキーの必須チェックとエラー伝播
 	if apiKey == "" {
@@ -76,10 +70,9 @@ func runApplication(cmd *cobra.Command, args []string) error {
 
 	// 1. Gemini Live API 設定の構築
 	geminiConfig := types.LiveAPIConfig{
-		APIKey:             apiKey,
-		Model:              modelName,
-		SystemInstruction:  systemInstruction,
-		ResponseModalities: responseModalities,
+		ModelName:         modelName,
+		SystemInstruction: systemInstruction,
+		// ResponseModalities: responseModalities, // LiveAPIConfig から削除された
 	}
 
 	// 2. パイプライン設定の構築 (ポーリング間隔を含む)
@@ -88,16 +81,16 @@ func runApplication(cmd *cobra.Command, args []string) error {
 	}
 
 	log.Println("--- Gemini Live Prompter ---")
-	log.Printf("Model: %s", geminiConfig.Model)
+	log.Printf("Model: %s", geminiConfig.ModelName)
 	log.Printf("System Instruction: %s", geminiConfig.SystemInstruction)
-	log.Printf("Response Modalities: %v", geminiConfig.ResponseModalities)
+	log.Printf("Response Modalities: %v", responseModalities)
 	log.Printf("YouTube Channel ID: %s", youtubeChannelID)
 	log.Printf("YouTube Polling Interval: %v", pipelineConfig.PollingInterval)
 	log.Printf("OAuth Port: %d", oauthPort)
 	log.Println("----------------------------")
 
 	// 3. Gemini Live Client の初期化
-	liveClient, err := gemini.NewLiveClient(ctx, geminiConfig.APIKey)
+	liveClient, err := gemini.NewClient(ctx, apiKey, geminiConfig.ModelName, geminiConfig.SystemInstruction)
 	if err != nil {
 		return fmt.Errorf("error initializing Gemini Client: %w", err)
 	}

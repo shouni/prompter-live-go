@@ -1,147 +1,52 @@
 package cmd
 
 import (
-	"context"
-	"crypto/rand"
-	"encoding/base64"
 	"fmt"
-	"net/http"
-	"os"
-	"time"
-
-	"prompter-live-go/internal/util" // ユーティリティパッケージをインポート
+	"log"
 
 	"github.com/spf13/cobra"
-	"golang.org/x/oauth2"
+
+	"prompter-live-go/internal/youtube"
 )
 
-// authCmd は OAuth2 認証フローを開始し、トークンをファイルに保存します。
+// authCmd は YouTube 認証フローを開始するためのコマンド定義です。
 var authCmd = &cobra.Command{
 	Use:   "auth",
-	Short: "Google/YouTube OAuth2 認証フローを開始し、トークンを保存します。",
-	Long:  "このコマンドを実行するとブラウザが開かれ、YouTube チャンネルへのアクセスを許可するよう求められます。",
-	RunE:  authRunE,
+	Short: "Authenticate with YouTube Data API via OAuth 2.0.",
+	Long: `This command initiates the OAuth 2.0 flow to authorize this application to 
+read and post comments on your behalf to YouTube Live Chats.`,
+	RunE: authApplication,
 }
-
-var authPort int
 
 func init() {
-	// ルートコマンドに authCmd を追加
+	// rootCmd は cmd/root.go で定義され、同じパッケージ内にあるため、アクセス可能です。
 	rootCmd.AddCommand(authCmd)
-	// ポート指定フラグを追加
-	authCmd.Flags().IntVar(&authPort, "oauth-port", 8080, "OAuth認証サーバーがリッスンするポート番号")
+
+	// フラグは cmd/root.go のグローバル変数にバインドされます
+	authCmd.Flags().IntVar(&oauthPort, "oauth-port", 8080, "Port used for OAuth2 authentication flow.")
 }
 
-// generateRandomState は暗号論的に安全なランダムな文字列を生成します。
-func generateRandomState() (string, error) {
-	b := make([]byte, 16)
-	_, err := rand.Read(b)
+// authApplication は認証フローを実行します。
+func authApplication(cmd *cobra.Command, args []string) error {
+	log.Println("Starting YouTube OAuth2 authentication flow...")
+
+	// 💡 修正: 宣言されているが使用されていなかった ctx と cancel の行を削除します。
+	// ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// defer cancel()
+
+	// 1. OAuth2 設定を取得 (ここで YT_CLIENT_ID/SECRET が必要)
+	config, err := youtube.GetOAuth2Config()
 	if err != nil {
-		return "", err
+		return fmt.Errorf("failed to get OAuth2 config. Ensure client_secret.json and environment variables are set: %w", err)
 	}
-	return base64.URLEncoding.EncodeToString(b), nil
-}
 
-// authRunE は auth コマンドの実行ロジックです。
-func authRunE(cmd *cobra.Command, args []string) error {
-	ctx := context.Background()
-
-	// 1. OAuth2 Config を取得
-	// internal/util の GetOAuth2Config を使用
-	config := util.GetOAuth2Config(authPort)
-
-	// 2. 認証 URL を生成
-	state, err := generateRandomState()
+	// 2. トークンを取得し、保存する
+	// GetToken は、認証フローを処理し、トークンを保存するロジックを含んでいます。
+	_, err = youtube.GetToken(config, oauthPort)
 	if err != nil {
-		return fmt.Errorf("stateの生成に失敗: %w", err)
+		return fmt.Errorf("failed to complete authentication and retrieve token: %w", err)
 	}
 
-	// AccessTypeOffline はリフレッシュトークンを取得するために必須
-	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
-
-	fmt.Printf("➡️ ブラウザで以下のURLを開き、YouTube へのアクセスを許可してください:\n%s\n", authURL)
-
-	// 3. ユーザー認証を待つための HTTP サーバーを起動
-	serverMux := http.NewServeMux()
-	server := &http.Server{
-		Addr:    fmt.Sprintf(":%d", authPort),
-		Handler: serverMux,
-	}
-
-	// サーバーを起動 (Go routine で実行)
-	go func() {
-		fmt.Printf("🌐 認証コールバックサーバー (http://localhost:%d/callback) を起動しました。\n", authPort)
-		if err := server.ListenAndServe(); err != http.ErrServerClosed {
-			fmt.Fprintf(os.Stderr, "❌ 認証サーバーエラー: %v\n", err)
-			os.Exit(1)
-		}
-	}()
-
-	// 4. トークンを格納するためのチャネル
-	tokenChan := make(chan *oauth2.Token)
-	errChan := make(chan error)
-
-	// 5. コールバックハンドラーの設定
-	serverMux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
-		// State の検証 (CSRF対策)
-		if r.FormValue("state") != state {
-			http.Error(w, "State mismatch", http.StatusBadRequest)
-			errChan <- fmt.Errorf("state mismatch: 予想されたstate=%s, 受信したstate=%s", state, r.FormValue("state"))
-			return
-		}
-
-		// エラーチェック
-		if r.FormValue("error") != "" {
-			http.Error(w, "Authentication error", http.StatusBadRequest)
-			errChan <- fmt.Errorf("authentication failed: %s", r.FormValue("error"))
-			return
-		}
-
-		// 認証コードを取得
-		code := r.FormValue("code")
-
-		// トークンに交換
-		token, err := config.Exchange(ctx, code)
-		if err != nil {
-			http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
-			errChan <- fmt.Errorf("トークンの交換に失敗: %w", err)
-			return
-		}
-
-		// 成功メッセージを表示し、サーバーをシャットダウン
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprintf(w, "<h1>✅ 認証成功！</h1><p>アプリケーションに戻り、トークンが保存されたことを確認してください。</p><p>このウィンドウは閉じて構いません。</p>")
-
-		tokenChan <- token
-
-		// サーバーを停止
-		go func() {
-			time.Sleep(1 * time.Second) // クライアントへのレスポンス完了を待つ
-			server.Shutdown(ctx)
-		}()
-	})
-
-	// 6. ブラウザを開く
-	fmt.Println("🚀 ブラウザを開いています...")
-	util.OpenBrowser(authURL) // internal/util の OpenBrowser を使用
-
-	// 7. 結果を待つ
-	select {
-	case token := <-tokenChan:
-		// トークンをファイルに保存
-		tokenPath := util.TokenFilePath() // トークン保存パスを取得
-		if err := util.SaveToken(tokenPath, token); err != nil {
-			return fmt.Errorf("トークンのファイル保存に失敗: %w", err)
-		}
-		fmt.Printf("\n✅ 認証トークンを '%s' に保存しました。サービスを実行できます。\n", tokenPath)
-		return nil
-	case err := <-errChan:
-		// サーバーを確実にシャットダウン
-		server.Shutdown(ctx)
-		return err
-	case <-ctx.Done():
-		// サーバーを確実にシャットダウン
-		server.Shutdown(ctx)
-		return fmt.Errorf("認証プロセスがキャンセルされました")
-	}
+	log.Println("✅ Authentication successful! The token has been saved.")
+	return nil
 }

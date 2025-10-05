@@ -2,13 +2,18 @@ package youtube
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"google.golang.org/api/option"
 	"google.golang.org/api/youtube/v3"
 )
+
+// ErrLiveChatEnded はライブチャットが終了したことを示すカスタムエラー
+var ErrLiveChatEnded = errors.New("live chat ended")
 
 // Comment は YouTube のライブチャットメッセージを表す構造体
 type Comment struct {
@@ -25,8 +30,9 @@ type Client struct {
 	service *youtube.Service
 
 	// ライブチャットの状態を管理するためのフィールド
-	liveChatID    string
-	nextPageToken string
+	liveChatID            string
+	nextPageToken         string
+	lastFetchedCommentIDs map[string]struct{}
 }
 
 // NewClient は新しい YouTube Client のインスタンスを作成します。
@@ -52,8 +58,9 @@ func NewClient(ctx context.Context, channelID string, oauthPort int) (*Client, e
 	log.Printf("YouTube Service successfully initialized for channel %s.", channelID)
 
 	return &Client{
-		channelID: channelID,
-		service:   service,
+		channelID:             channelID,
+		service:               service,
+		lastFetchedCommentIDs: make(map[string]struct{}),
 	}, nil
 }
 
@@ -63,7 +70,8 @@ func (c *Client) findLiveChatID(ctx context.Context) (string, error) {
 	call := c.service.Search.List([]string{"id"}).
 		ChannelId(c.channelID).
 		EventType("live").
-		Type("video")
+		Type("video").
+		MaxResults(1)
 
 	response, err := call.Context(ctx).Do()
 	if err != nil {
@@ -115,6 +123,16 @@ func (c *Client) FetchLiveChatMessages(ctx context.Context) ([]Comment, error) {
 
 	response, err := call.Context(ctx).Do()
 	if err != nil {
+		// YouTube API が返すエラーメッセージをチェック
+		// "liveChatEnded" または類似のエラーメッセージが含まれるかチェック
+		if strings.Contains(err.Error(), "liveChatEnded") || strings.Contains(err.Error(), "live chat is inactive") {
+			// ライブチャット終了エラーの場合
+			log.Printf("YouTube API Error: Live chat ended. Error: %v", err)
+			c.liveChatID = "" // 💡 修正: liveChatID をリセット
+			c.nextPageToken = ""
+			return nil, ErrLiveChatEnded // 💡 修正: カスタムエラーを返す
+		}
+		// その他のエラー
 		return nil, fmt.Errorf("failed to fetch live chat messages: %w", err)
 	}
 

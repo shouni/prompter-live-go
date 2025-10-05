@@ -47,9 +47,6 @@ func GetOAuth2Config() (*oauth2.Config, error) {
 		return nil, fmt.Errorf("error parsing client secret config: %w", err)
 	}
 
-	// リダイレクトURIは、ローカルサーバーとマッチさせる必要があります
-	config.RedirectURL = "http://localhost"
-
 	return config, nil
 }
 
@@ -99,9 +96,6 @@ func loadToken() (*oauth2.Token, error) {
 
 // getTokenFromWeb はウェブ認証フローを実行し、トークンを取得します。
 func getTokenFromWeb(config *oauth2.Config, oauthPort int) (*oauth2.Token, error) {
-	// 認証URLを生成
-	authURL := config.AuthCodeURL("state-token", oauth2.AccessTypeOffline)
-
 	// HTTPサーバーを立ち上げるポートを設定
 	serverPort := strconv.Itoa(oauthPort)
 	if oauthPort == 0 {
@@ -109,10 +103,10 @@ func getTokenFromWeb(config *oauth2.Config, oauthPort int) (*oauth2.Token, error
 	}
 
 	redirectURL := "http://localhost:" + serverPort
+	config.RedirectURL = fmt.Sprintf("http://localhost:%d/callback", serverPort)
 
 	// ユーザーに認証を促す
 	log.Printf("Please go to the following URL in your browser and authorize the app:")
-	log.Printf("%s", authURL)
 	log.Printf("You will be redirected to: %s", redirectURL)
 
 	// ローカルサーバーを立ち上げてリダイレクトを待ち受ける
@@ -120,7 +114,7 @@ func getTokenFromWeb(config *oauth2.Config, oauthPort int) (*oauth2.Token, error
 
 	srv := &http.Server{Addr: ":" + serverPort}
 
-	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+	http.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
 		code := r.FormValue("code")
 		if code != "" {
 			w.Header().Set("Content-Type", "text/plain")
@@ -137,9 +131,10 @@ func getTokenFromWeb(config *oauth2.Config, oauthPort int) (*oauth2.Token, error
 
 	// サーバーを非同期で起動
 	go func() {
-		log.Printf("Starting local server on port %s to receive callback...", serverPort)
+		log.Printf("Listening for OAuth callback on http://localhost:%d/callback", serverPort)
 		if err := srv.ListenAndServe(); err != http.ErrServerClosed {
-			log.Fatalf("HTTP server failed: %v", err)
+			log.Printf("Error: HTTP server failed unexpectedly: %v", err)
+			// errorChan に送信するとブロッキングする可能性があるため、ログ出力のみとする
 		}
 	}()
 
