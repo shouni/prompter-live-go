@@ -2,110 +2,130 @@ package cmd
 
 import (
 	"context"
-	"crypto/rand"     // ⭐️ 新規インポート: CSRF対策用
-	"encoding/base64" // ⭐️ 新規インポート: CSRF対策用
 	"fmt"
+	"net/http"
 	"os"
 	"time"
 
-	"prompter-live-go/internal/apis"
 	"prompter-live-go/internal/util"
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
 )
 
-// トークン保存先ファイルパス (ハードコードを維持。フラグ化は不要と判断)
-const tokenFilePath = "config/token.json"
-
-// authFlags は 'auth' コマンド固有のフラグ値を保持するための構造体です。
+// authFlags は auth コマンドのフラグを保持するための構造体です。
 var authFlags struct {
-	oauthPort string
+	port int
 }
 
+// authCmd は OAuth2 認証フローを開始し、トークンをファイルに保存します。
 var authCmd = &cobra.Command{
 	Use:   "auth",
-	Short: "YouTube APIにアクセスするためのOAuth 2.0認証フローを実行します",
-	Long: `このコマンドは、Google Cloud Platformで取得したクライアントIDとシークレットを使用して、
-YouTubeチャンネルへのコメント投稿権限を取得するためのOAuth 2.0認証フローを開始します。
-
-認証後、アクセストークンとリフレッシュトークンがローカルファイルに保存されます。`,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("--- Prompter Live Go: OAuth 2.0 認証 ---")
-
-		// 1. 環境変数からクライアントIDとシークレットを読み込み、チェック
-		clientID := os.Getenv("YOUTUBE_CLIENT_ID")
-		clientSecret := os.Getenv("YOUTUBE_CLIENT_SECRET")
-
-		if clientID == "" || clientSecret == "" {
-			return fmt.Errorf("\n❌ エラー: YOUTUBE_CLIENT_ID または YOUTUBE_CLIENT_SECRET 環境変数が設定されていません。\nREADMEを参照し、Google Cloud Platformでクライアント情報を設定してください。")
-		}
-
-		// 2. OAuth2 設定の構成
-		config := &oauth2.Config{
-			ClientID:     clientID,
-			ClientSecret: clientSecret,
-			Scopes:       []string{"https://www.googleapis.com/auth/youtube.force-ssl"},
-			Endpoint: oauth2.Endpoint{
-				AuthURL:  "https://accounts.google.com/o/oauth2/auth",
-				TokenURL: "https://oauth2.googleapis.com/token",
-			},
-			// ⭐️ 【修正箇所】oauthPortをフラグから取得
-			RedirectURL: "http://localhost:" + authFlags.oauthPort + "/oauth/callback",
-		}
-
-		// 3. ローカルサーバーを起動し、認証コードを待ち受ける
-		server := apis.NewOAuthServer(authFlags.oauthPort) //
-		b := make([]byte, 16)
-		rand.Read(b)
-		state := base64.URLEncoding.EncodeToString(b)
-
-		server.ExpectedState = state
-		server.Start()
-
-		// 4. ユーザーを認証URLに誘導
-		// 認証URLにランダムなstateを含める
-		authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.ApprovalForce)
-		fmt.Printf("\n🚀 以下のURLをブラウザで開いて、YouTubeチャンネルに権限を与えてください:\n%s\n", authURL)
-
-		// 5. チャネルから認証コードを受け取るまで待機
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-		defer cancel()
-
-		var code string
-		select {
-		case code = <-server.CodeChan:
-			server.Stop()
-			if code == "" {
-				return fmt.Errorf("\n❌ 認証コードの受信中にエラーが発生しました。不正なStateまたは認証失敗です。")
-			}
-		case <-ctx.Done():
-			// タイムアウト
-			server.Stop() // ⭐️ 【修正箇所】タイムアウトの場合もサーバーを停止
-			return fmt.Errorf("\n❌ 認証タイムアウト: 5分以内に認証コードが受信されませんでした。")
-		}
-
-		// 6. 認証コードをアクセストークンに交換
-		fmt.Println("\n✅ 認証コードを受信。アクセストークンを取得中...")
-		token, err := config.Exchange(context.Background(), code)
-		if err != nil {
-			return fmt.Errorf("\n❌ トークン交換に失敗: %w", err)
-		}
-
-		// 7. トークンをファイルに保存
-		if err := util.SaveToken(tokenFilePath, token); err != nil {
-			return fmt.Errorf("\n❌ トークンの保存に失敗: %w", err)
-		}
-
-		fmt.Printf("\n🎉 認証成功！アクセストークンとリフレッシュトークンが '%s' に保存されました。\n", tokenFilePath)
-		return nil
-	},
+	Short: "Google/YouTube OAuth2 認証フローを開始し、トークンを保存します。",
+	Long:  "このコマンドを実行するとブラウザが開かれ、YouTube チャンネルへのアクセスを許可するよう求められます。",
+	RunE:  authRunE,
 }
 
-// init 関数で authCmd の固有フラグを定義します。
 func init() {
-	authCmd.Flags().StringVar(
-		&authFlags.oauthPort, "oauth-port", "8080",
-		"OAuth認証サーバーが待ち受けるポート番号",
-	)
+	rootCmd.AddCommand(authCmd)
+	// ポート番号を指定できるように新しいフラグを追加
+	authCmd.Flags().IntVar(&authFlags.port, "oauth-port", 8080, "認証コールバックサーバーがリッスンするポート番号")
+}
+
+// authRunE は auth コマンドの実行ロジックです。
+func authRunE(cmd *cobra.Command, args []string) error {
+	ctx := context.Background()
+
+	callbackURL := fmt.Sprintf("http://localhost:%d/callback", authFlags.port)
+
+	// 1. OAuth2 Config を取得
+	config := util.GetOAuth2Config()
+	// 実行時に設定されたポートに合わせてリダイレクトURLを上書き
+	config.RedirectURL = callbackURL
+
+	// 2. 認証 URL を生成
+	state := "random-state-string"
+	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
+
+	fmt.Printf("➡️ ブラウザで以下のURLを開き、YouTube へのアクセスを許可してください:\n%s\n", authURL)
+
+	// 3. ユーザー認証を待つための HTTP サーバーを起動
+	serverAddr := fmt.Sprintf(":%d", authFlags.port)
+	serverMux := http.NewServeMux()
+	server := &http.Server{
+		Addr:    serverAddr,
+		Handler: serverMux,
+	}
+
+	// サーバーを起動 (Go routine で実行)
+	go func() {
+		fmt.Printf("🌐 認証コールバックサーバー (%s) を起動しました。\n", callbackURL)
+		if err := server.ListenAndServe(); err != http.ErrServerClosed {
+			fmt.Fprintf(os.Stderr, "❌ 認証サーバーエラー: %v\n", err)
+			os.Exit(1)
+		}
+	}()
+
+	// 4. トークンを格納するためのチャネル
+	tokenChan := make(chan *oauth2.Token)
+	errChan := make(chan error)
+
+	// 5. コールバックハンドラーの設定
+	serverMux.HandleFunc("/callback", func(w http.ResponseWriter, r *http.Request) {
+		// State の検証
+		if r.FormValue("state") != state {
+			http.Error(w, "State mismatch", http.StatusBadRequest)
+			errChan <- fmt.Errorf("state mismatch")
+			return
+		}
+
+		// エラーチェック
+		if r.FormValue("error") != "" {
+			http.Error(w, "Authentication error", http.StatusBadRequest)
+			errChan <- fmt.Errorf("authentication failed: %s", r.FormValue("error"))
+			return
+		}
+
+		// 認証コードを取得
+		code := r.FormValue("code")
+
+		// トークンに交換
+		token, err := config.Exchange(ctx, code)
+		if err != nil {
+			http.Error(w, "Failed to exchange token", http.StatusInternalServerError)
+			errChan <- fmt.Errorf("トークンの交換に失敗: %w", err)
+			return
+		}
+
+		// 成功メッセージを表示し、サーバーをシャットダウン
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		fmt.Fprintf(w, "<h1>✅ 認証成功！</h1><p>アプリケーションに戻り、トークンが保存されたことを確認してください。</p><p>このウィンドウは閉じて構いません。</p>")
+
+		tokenChan <- token
+
+		// サーバーを停止
+		go func() {
+			time.Sleep(1 * time.Second) // クライアントへのレスポンス完了を待つ
+			server.Shutdown(ctx)
+		}()
+	})
+
+	// 6. ブラウザを開く
+	fmt.Println("🚀 ブラウザを開いています...")
+	util.OpenBrowser(authURL)
+
+	// 7. 結果を待つ
+	select {
+	case token := <-tokenChan:
+		// トークンをファイルに保存
+		if err := util.SaveToken(util.TokenPath, token); err != nil {
+			return fmt.Errorf("トークンのファイル保存に失敗: %w", err)
+		}
+		fmt.Printf("\n✅ 認証トークンを '%s' に保存しました。サービスを実行できます。\n", util.TokenPath)
+		return nil
+	case err := <-errChan:
+		return err
+	case <-ctx.Done():
+		return fmt.Errorf("認証プロセスがキャンセルされました")
+	}
 }
