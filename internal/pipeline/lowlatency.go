@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"regexp"  // 正規表現を使用
+	"strings" // 文字列処理に使用
 	"time"
 	"unicode/utf8"
 
@@ -50,10 +52,8 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	responseChan := make(chan *types.LowLatencyResponse)
 	errorChan := make(chan error, 1)
 
-	// 応答受信ハンドラを開始
 	go p.handleReceive(session, responseChan, errorChan)
 
-	// ライブチャットのポーリングとGeminiへの入力ハンドラを開始
 	go p.handleLiveChatPollingAndInput(ctx, session, errorChan)
 
 	for {
@@ -74,7 +74,6 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 				if p.youtubeClient != nil {
 					go func(text string) {
 						if err := p.youtubeClient.PostComment(ctx, text); err != nil {
-							// 投稿エラーはログに出力し、パイプラインは継続
 							log.Printf("Error posting comment to YouTube: %v", err)
 						}
 					}(safeText)
@@ -87,26 +86,53 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 
 		case <-ctx.Done():
 			log.Println("Pipeline shutting down due to context cancellation.")
-			// クリーンシャットダウンのために context.Canceled を返す
 			return ctx.Err()
 		}
 	}
 }
 
-// sanitizeMessage はメッセージを指定された最大文字数（UTF-8ラン）に切り詰めます。
+// sanitizeMessage はメッセージをYouTubeコメントとして最適な形式に整形します。
 func sanitizeMessage(message string) string {
+	// 1. Markdown記号の除去
+	// コードブロック (```...```) やインラインコード (`...`) を除去
+	reCodeBlock := regexp.MustCompile("```[^`]*```")
+	message = reCodeBlock.ReplaceAllString(message, "")
+	reInlineCode := regexp.MustCompile("`([^`]+)`")
+	message = reInlineCode.ReplaceAllString(message, "$1") // バッククォートのみ除去し、中身は残す
+
+	// 強調記号 (**text**, *text*, __text__, _text_) の除去
+	reEmphasis := regexp.MustCompile(`(\*\*|__)(.*?)\1`)
+	message = reEmphasis.ReplaceAllString(message, "$2")
+	reSingleEmphasis := regexp.MustCompile(`(\*|_)(.*?)\1`)
+	message = reSingleEmphasis.ReplaceAllString(message, "$2")
+
+	// ヘッダー (#) や引用 (>) の記号を除去
+	reHeaders := regexp.MustCompile(`^[#]+[\s]?`)
+	message = reHeaders.ReplaceAllString(message, "")
+	message = strings.ReplaceAll(message, ">", "")
+
+	// リスト記号 (*, -, 数字.) の除去（行頭のみ）
+	reList := regexp.MustCompile(`^[\s]*[*-] `)
+	message = reList.ReplaceAllString(message, "")
+	reNumberedList := regexp.MustCompile(`^[\s]*\d+\. `)
+	message = reNumberedList.ReplaceAllString(message, "")
+
+	// 2. 連続する改行を統一
+	reMultipleNewlines := regexp.MustCompile(`\n{2,}`)
+	message = reMultipleNewlines.ReplaceAllString(message, "\n")
+
+	// 3. 前後の余分な空白・改行を除去
+	message = strings.TrimSpace(message)
+
+	// 4. 文字数制限による切り詰め (前回実装したロジック)
 	if utf8.RuneCountInString(message) <= youtubeMaxCommentLength {
 		return message
 	}
 
-	// 500文字目までの部分文字列を取得し、UTF-8文字単位で安全に切り詰める
 	runes := []rune(message)
 	trimmedRunes := runes[:youtubeMaxCommentLength]
 
-	// 切り詰めたことを示すサフィックスを追加
 	suffix := "..."
-
-	// サフィックスを追加すると500文字を超える場合は、サフィックスが収まるように調整
 	if utf8.RuneCountInString(string(trimmedRunes))+utf8.RuneCountInString(suffix) > youtubeMaxCommentLength {
 		trimmedRunes = runes[:youtubeMaxCommentLength-utf8.RuneCountInString(suffix)]
 	}
@@ -143,14 +169,11 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 				comments, err = p.youtubeClient.FetchLiveChatMessages(ctx)
 
 				if err == nil {
-					// 成功
 					break
 				}
 
-				// エラーが発生した場合
 				log.Printf("Error fetching live chat messages (Attempt %d/%d): %v", attempt+1, maxRetries, err)
 
-				// 最後の試行でなければ待機
 				if attempt < maxRetries-1 {
 					delay := initialDelay * time.Duration(1<<attempt)
 					log.Printf("Retrying in %v...", delay)
@@ -164,7 +187,6 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 			}
 
 			if err != nil {
-				// 最大試行回数を超えても復旧しない場合、致命的なエラーとしてパイプラインを停止
 				errorChan <- fmt.Errorf("failed to fetch live chat messages after %d retries: %w", maxRetries, err)
 				return
 			}
@@ -173,7 +195,6 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 				log.Printf("Fetched %d new comments. Sending to Gemini Live API...", len(comments))
 
 				for _, comment := range comments {
-					// 取得したコメントを Gemini Live API セッションにテキストとして送信
 					inputData := types.LiveStreamData{
 						MimeType: "text/plain",
 						Data:     []byte(comment.Message),
