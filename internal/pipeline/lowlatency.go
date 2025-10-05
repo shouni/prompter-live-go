@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"time"
+	"unicode/utf8"
 
 	"prompter-live-go/internal/gemini"
 	"prompter-live-go/internal/types"
@@ -14,13 +15,16 @@ import (
 // Config はパイプライン動作のための設定を保持します。
 type Config = types.PipelineConfig
 
+// YouTubeのライブチャットコメントの最大文字数 (500文字)
+const youtubeMaxCommentLength = 500
+
 // LowLatencyPipeline は低遅延処理の中核を担い、入力と AI 応答のストリームを管理します。
 type LowLatencyPipeline struct {
 	liveClient    gemini.LiveClient
 	youtubeClient *youtube.Client
 
 	geminiConfig   types.LiveAPIConfig
-	pipelineConfig Config // PipelineConfig (ポーリング間隔など)
+	pipelineConfig Config
 }
 
 // NewLowLatencyPipeline は新しいパイプラインインスタンスを作成します。
@@ -29,7 +33,7 @@ func NewLowLatencyPipeline(client gemini.LiveClient, youtubeClient *youtube.Clie
 		liveClient:     client,
 		youtubeClient:  youtubeClient,
 		geminiConfig:   geminiConfig,
-		pipelineConfig: pipelineConfig, // 設定を格納
+		pipelineConfig: pipelineConfig,
 	}
 }
 
@@ -37,7 +41,6 @@ func NewLowLatencyPipeline(client gemini.LiveClient, youtubeClient *youtube.Clie
 func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	log.Println("Starting Live API connection...")
 
-	// Gemini Live API に接続
 	session, err := p.liveClient.Connect(ctx, p.geminiConfig)
 	if err != nil {
 		return fmt.Errorf("failed to connect to Live API: %w", err)
@@ -47,7 +50,7 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	responseChan := make(chan *types.LowLatencyResponse)
 	errorChan := make(chan error, 1)
 
-	// レスポンス受信ハンドラを開始
+	// 応答受信ハンドラを開始
 	go p.handleReceive(session, responseChan, errorChan)
 
 	// ライブチャットのポーリングとGeminiへの入力ハンドラを開始
@@ -63,7 +66,9 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 			}
 
 			if resp.Text != "" {
-				log.Printf("Received AI Text: %s", resp.Text)
+				// 応答テキストをYouTubeの文字数制限に合わせてサニタイズ
+				safeText := sanitizeMessage(resp.Text)
+				log.Printf("Received AI Text (Sanitized to %d chars): %s", utf8.RuneCountInString(safeText), safeText)
 
 				// AI応答をYouTubeに投稿する (非同期で実行)
 				if p.youtubeClient != nil {
@@ -72,7 +77,7 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 							// 投稿エラーはログに出力し、パイプラインは継続
 							log.Printf("Error posting comment to YouTube: %v", err)
 						}
-					}(resp.Text)
+					}(safeText)
 				}
 			}
 
@@ -82,9 +87,32 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 
 		case <-ctx.Done():
 			log.Println("Pipeline shutting down due to context cancellation.")
+			// クリーンシャットダウンのために context.Canceled を返す
 			return ctx.Err()
 		}
 	}
+}
+
+// sanitizeMessage はメッセージを指定された最大文字数（UTF-8ラン）に切り詰めます。
+func sanitizeMessage(message string) string {
+	if utf8.RuneCountInString(message) <= youtubeMaxCommentLength {
+		return message
+	}
+
+	// 500文字目までの部分文字列を取得し、UTF-8文字単位で安全に切り詰める
+	runes := []rune(message)
+	trimmedRunes := runes[:youtubeMaxCommentLength]
+
+	// 切り詰めたことを示すサフィックスを追加
+	suffix := "..."
+
+	// サフィックスを追加すると500文字を超える場合は、サフィックスが収まるように調整
+	if utf8.RuneCountInString(string(trimmedRunes))+utf8.RuneCountInString(suffix) > youtubeMaxCommentLength {
+		trimmedRunes = runes[:youtubeMaxCommentLength-utf8.RuneCountInString(suffix)]
+	}
+
+	log.Printf("Warning: AI response exceeds %d characters. Trimming message.", youtubeMaxCommentLength)
+	return string(trimmedRunes) + suffix
 }
 
 // handleLiveChatPollingAndInput は YouTube Live Chat を定期的にポーリングし、新しいコメントを
@@ -104,7 +132,7 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 			return
 		case <-ticker.C:
 
-			// YouTube API呼び出しのリトライロジック
+			// YouTube API呼び出しのリトライロジック (指数バックオフ)
 			maxRetries := 3
 			initialDelay := 1 * time.Second
 
@@ -115,14 +143,14 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 				comments, err = p.youtubeClient.FetchLiveChatMessages(ctx)
 
 				if err == nil {
-					// 成功した場合
+					// 成功
 					break
 				}
 
 				// エラーが発生した場合
 				log.Printf("Error fetching live chat messages (Attempt %d/%d): %v", attempt+1, maxRetries, err)
 
-				// 最後の試行でなければ待機 (指数バックオフ)
+				// 最後の試行でなければ待機
 				if attempt < maxRetries-1 {
 					delay := initialDelay * time.Duration(1<<attempt)
 					log.Printf("Retrying in %v...", delay)
@@ -144,18 +172,16 @@ func (p *LowLatencyPipeline) handleLiveChatPollingAndInput(ctx context.Context, 
 			if len(comments) > 0 {
 				log.Printf("Fetched %d new comments. Sending to Gemini Live API...", len(comments))
 
-				// 各コメントをGemini Live APIセッションに送信
 				for _, comment := range comments {
+					// 取得したコメントを Gemini Live API セッションにテキストとして送信
 					inputData := types.LiveStreamData{
-						// テキストデータであることを示すMIME Type
 						MimeType: "text/plain",
-						// メッセージの内容をバイトスライスに変換して送信
-						Data: []byte(comment.Message),
+						Data:     []byte(comment.Message),
 					}
 
 					if err := session.Send(inputData); err != nil {
 						errorChan <- fmt.Errorf("error sending comment to Gemini Live API: %w", err)
-						return // 送信エラーはパイプライン全体を停止
+						return
 					}
 					log.Printf("Sent to AI: '%s' (by %s)", comment.Message, comment.Author)
 				}
