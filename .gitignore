@@ -36,5 +36,9 @@ gemini_reviewer	prompter_live
 /var/
 /.env
 /workspace.xml
-/config/token.json
 /internal/pipeline/bin/prompter_live
+
+client_secret.json
+config/token.json
+tokens/
+
