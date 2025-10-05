@@ -85,6 +85,12 @@ func sanitizeMessage(message string) string {
 	// 2. 過剰な改行を削除し、文字列の先頭と末尾の空白を削除
 	message = strings.TrimSpace(message)
 	message = strings.ReplaceAll(message, "\n", " ")
+	// 3. YouTubeのコメント文字数制限 (最大500文字) を考慮
+	const youtubeCommentLimit = 500
+	if len(message) > youtubeCommentLimit {
+		slog.Warn("メッセージが長すぎるため切り詰めます。", "original_len", len(message), "limit", youtubeCommentLimit)
+		message = message[:youtubeCommentLimit]
+	}
 
 	return message
 }

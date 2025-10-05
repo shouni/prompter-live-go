@@ -122,7 +122,7 @@ func (ts *AutoSavingTokenSource) Token() (*oauth2.Token, error) {
 
 	// トークンが有効な場合、新しいトークンがリフレッシュされた可能性があるため、保存を試みる。
 	// RefreshToken が設定されている、またはトークン自体が更新されている場合は保存される。
-	if token.Valid() && token.RefreshToken != "" {
+	if token.Valid() { // ここを修正
 		ts.mu.Lock()
 		defer ts.mu.Unlock()
 		// バックグラウンドでエラーを無視して保存。
