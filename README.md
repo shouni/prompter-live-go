@@ -1,7 +1,7 @@
 # 🤖 Prompter Live Go
 
 [![Language](https://img.shields.io/badge/Language-Go-blue)](https://golang.org/)
-[![Go Version](https://img.shields.io/github/go-mod/go-version/shouni/git-gemini-reviewer-go)](https://golang.org/)
+[![Go Version](https://img.shields.io/badge/Go%20Version-1.21%2B-blue)](https://golang.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 🚀 概要 (About) - エンゲージメントを掴み、サイト誘導を加速するAIプロモーションパートナー
@@ -154,6 +154,4 @@ AI のキャラクター設定はコマンドライン引数 (`-i` / `--instruct
 
 このプロジェクトは [MIT License](https://opensource.org/licenses/MIT) の下で公開されています。
 
-```
-```
 
