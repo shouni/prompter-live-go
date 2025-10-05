@@ -9,8 +9,7 @@ import (
 	"prompter-live-go/internal/types"
 )
 
-// LiveSession はパイプラインが使用するGemini Liveセッションのインターフェースを定義します。
-// これは pipeline.LiveSession と統合されます。
+// LiveSession はパイプラインが利用する、Gemini Liveセッションのインターフェースです。
 type LiveSession interface {
 	Send(data types.LiveStreamData) error
 	RecvResponse() (*types.LowLatencyResponse, error)
@@ -19,39 +18,48 @@ type LiveSession interface {
 
 // LiveClient は Gemini Live API への接続を管理するためのクライアント構造体です。
 type LiveClient struct {
-	// 実際のSDKクライアントは構造体内部で保持されるが、ここでは抽象化
+	// 実際のSDKクライアントを保持
 	apiKey string
+	// MOCK: SDKクライアントは外部から注入されると仮定
 }
 
 // --- SDK型をラップする構造体とインターフェースの定義 ---
 
-// sdkLiveStream は、SDKがConnect呼び出しで返すオブジェクトが満たすべき
-// 最小限のメソッドを定義します。これにより、Connectメソッドの戻り値の型を
-// interface{} からこのインターフェース型へ置き換えることを意図します。
+// sdkLiveStream は、SDKのConnect呼び出しが返す生のセッションオブジェクトのインターフェースです。
 type sdkLiveStream interface {
-	SDKSend(data interface{}) error // SDKが要求する形式で送信
-	SDKRecv() (interface{}, error)  // SDKの生応答を受信
+	SDKSend(data interface{}) error
+	SDKRecv() (interface{}, error)
 	Close() error
 }
 
-// liveSessionWrapper は sdkLiveStream をラップし、外部から利用される LiveSession インターフェースを満たします。
+// liveSessionWrapper は sdkLiveStream をラップし、LiveSession インターフェースを満たします。
 type liveSessionWrapper struct {
 	session sdkLiveStream
 }
 
-// Send はパイプラインの型をSDKの型に変換して送信します。
+// Send はパイプラインの型をSDKが要求するペイロードに変換して送信します。
 func (w *liveSessionWrapper) Send(data types.LiveStreamData) error {
-	// 実際には data をSDKが要求するペイロードに変換して w.session.SDKSend(..) を呼び出す
-	log.Printf("[MOCK] Sending data: MimeType=%s", data.MimeType)
+	log.Printf("LiveSession: Sending input data (MimeType: %s)", data.MimeType)
 	return w.session.SDKSend(data)
 }
 
 // RecvResponse はSDKからの応答をパイプラインの型に変換して返します。
 func (w *liveSessionWrapper) RecvResponse() (*types.LowLatencyResponse, error) {
-	// 実際には w.session.SDKRecv() からSDKの応答を取得し、types.LowLatencyResponse に変換する
-	// MOCK: ダミーの応答を返す
-	// Note: パイプラインが動作するようにダミー応答を継続的に返す必要がある
-	return &types.LowLatencyResponse{Text: "[MOCK] AI response chunk.", Done: false}, nil
+	// 💡 修正点: rawResp, err := w.session.SDKRecv() の戻り値として rawResp を受け取る必要がないため、
+	// 変数を破棄する (_) に変更します。
+	_, err := w.session.SDKRecv()
+	if err != nil {
+		return nil, err
+	}
+
+	// 実際には rawResp を解析し、types.LowLatencyResponse に変換するロジックが必要
+	// MOCK: SDK応答構造体を types.LowLatencyResponse に変換すると仮定
+
+	// ダミーの待ち時間を追加し、ストリーム応答をシミュレート
+	time.Sleep(50 * time.Millisecond)
+
+	// MOCK: テキストを空にし、Doneをfalseにすることで、パイプライン側で応答を待機させる
+	return &types.LowLatencyResponse{Text: "", Done: false}, nil
 }
 
 // Close はセッションを閉じます。
@@ -72,24 +80,16 @@ func NewLiveClient(ctx context.Context, apiKey string) (*LiveClient, error) {
 }
 
 // Connect は Gemini Live API への新しいセッションを確立します。
-//
-// 💡 クリティカルな指摘への対応:
-// 接続結果を interface{} で受け取り型アサートするのではなく、SDKが直接 Liveセッションインターフェースを
-// 返すと仮定する設計に変更することで、アプリケーションコード内の脆い型アサーションを排除します。
 func (c *LiveClient) Connect(ctx context.Context, config types.LiveAPIConfig) (LiveSession, error) {
 	if c.apiKey == "" {
 		return nil, fmt.Errorf("cannot connect: api key is missing")
 	}
-	log.Printf("Connecting to Live API with model: %s", config.Model)
+
+	log.Printf("Connecting to Live API with model: %s, Instruction: %s...", config.Model, config.SystemInstruction)
 
 	// --- MOCK: 実際のSDK接続ロジックをシミュレート ---
-	// 実際には SDK の Connect 呼び出しが行われ、sdkLiveStream インターフェースを満たすオブジェクトが返る
+	rawSession := newMockSession() // sdkLiveStreamを満たすダミーセッション
 
-	// SDK接続が成功した場合、sdkLiveStreamを満たすオブジェクトが返されると仮定
-	rawSession := newMockSession() // newMockSessionはsdkLiveStreamを満たす必要あり
-
-	// 脆弱な型アサーションを伴う interface{} の受け渡しを排除し、
-	// LiveSession ラッパーを作成して返します。
 	return &liveSessionWrapper{session: rawSession}, nil
 }
 
@@ -104,14 +104,12 @@ func newMockSession() *mockSession {
 }
 
 func (m *mockSession) SDKSend(data interface{}) error {
-	// ダミー送信ロジック
 	return nil
 }
 
 func (m *mockSession) SDKRecv() (interface{}, error) {
-	// ダミー受信ロジック
-	time.Sleep(100 * time.Millisecond) // 遅延をシミュレート
-	// RecvResponseラッパー内でテキストを生成するため、ここではnilを返す
+	// パイプラインがブロックされないように、短い遅延を入れる
+	time.Sleep(10 * time.Millisecond)
 	return nil, nil
 }
 
