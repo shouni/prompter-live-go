@@ -9,7 +9,7 @@ import (
 	"os"
 	"time"
 
-	"prompter-live-go/internal/util"
+	"prompter-live-go/internal/util" // ユーティリティパッケージをインポート
 
 	"github.com/spf13/cobra"
 	"golang.org/x/oauth2"
@@ -26,6 +26,7 @@ var authCmd = &cobra.Command{
 var authPort int
 
 func init() {
+	// ルートコマンドに authCmd を追加
 	rootCmd.AddCommand(authCmd)
 	// ポート指定フラグを追加
 	authCmd.Flags().IntVar(&authPort, "oauth-port", 8080, "OAuth認証サーバーがリッスンするポート番号")
@@ -45,22 +46,22 @@ func generateRandomState() (string, error) {
 func authRunE(cmd *cobra.Command, args []string) error {
 	ctx := context.Background()
 
-	// 1. OAuth2 Config を取得 (動的なポート番号を渡すように修正)
+	// 1. OAuth2 Config を取得
+	// internal/util の GetOAuth2Config を使用
 	config := util.GetOAuth2Config(authPort)
 
 	// 2. 認証 URL を生成
-	// CSRF対策のため、セッションごとにユニークなランダムなstateを生成
 	state, err := generateRandomState()
 	if err != nil {
 		return fmt.Errorf("stateの生成に失敗: %w", err)
 	}
 
+	// AccessTypeOffline はリフレッシュトークンを取得するために必須
 	authURL := config.AuthCodeURL(state, oauth2.AccessTypeOffline, oauth2.SetAuthURLParam("prompt", "consent"))
 
 	fmt.Printf("➡️ ブラウザで以下のURLを開き、YouTube へのアクセスを許可してください:\n%s\n", authURL)
 
 	// 3. ユーザー認証を待つための HTTP サーバーを起動
-	// サーバーを起動してからブラウザを開く
 	serverMux := http.NewServeMux()
 	server := &http.Server{
 		Addr:    fmt.Sprintf(":%d", authPort),
@@ -120,18 +121,19 @@ func authRunE(cmd *cobra.Command, args []string) error {
 		}()
 	})
 
-	// 6. ブラウザを開く (macOS/Linux/Windowsに対応)
+	// 6. ブラウザを開く
 	fmt.Println("🚀 ブラウザを開いています...")
-	util.OpenBrowser(authURL)
+	util.OpenBrowser(authURL) // internal/util の OpenBrowser を使用
 
 	// 7. 結果を待つ
 	select {
 	case token := <-tokenChan:
 		// トークンをファイルに保存
-		if err := util.SaveToken(util.TokenPath, token); err != nil {
+		tokenPath := util.TokenFilePath() // トークン保存パスを取得
+		if err := util.SaveToken(tokenPath, token); err != nil {
 			return fmt.Errorf("トークンのファイル保存に失敗: %w", err)
 		}
-		fmt.Printf("\n✅ 認証トークンを '%s' に保存しました。サービスを実行できます。\n", util.TokenPath)
+		fmt.Printf("\n✅ 認証トークンを '%s' に保存しました。サービスを実行できます。\n", tokenPath)
 		return nil
 	case err := <-errChan:
 		// サーバーを確実にシャットダウン
