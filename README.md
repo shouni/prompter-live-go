@@ -6,6 +6,8 @@
 
 ## 🚀 概要 (About) - リアルタイム対話とAIプロモーションの**可能性を実証するPoCツール**
 
+**🎶 [デモ音声を聴く (MP3形式)](https://github.com/shouni/prompter-live-go/raw/main/assets/audio/prompter_live_demo.mp3)**
+
 **`Prompter Live Go`** は、**Google Gemini の強力な AI**、**Go言語の並行処理能力**、そして **Gemini Live API** の低遅延性能を活用し、YouTube配信におけるリアルタイムな視聴者コメントを**低遅延で処理**し、会話に溶け込む形で応答する**概念実証**（Proof of Concept / PoC）ツールです。
 
 本ツールは、AIが設定されたペルソナに従い、視聴者との会話の流れに自然に溶け込む形で応答することで、**プロモーション導線構築の可能性**を検証することを目的としています。
