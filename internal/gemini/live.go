@@ -6,90 +6,149 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
-	"time"
 
 	"prompter-live-go/internal/types"
 
 	"google.golang.org/genai"
 )
 
-// geminiLiveSession は Session インターフェースの実際の内部的な実装です。
-// Live API のストリーミングやチャットのロジックをラップします。
+// Session は Gemini Live API とのセッションインターフェースを定義します。
+type Session interface {
+	Send(ctx context.Context, data types.LiveStreamData) error
+	RecvResponse() (*types.LowLatencyResponse, error)
+	Close()
+}
+
+// geminiLiveSession は Session インターフェースの実装です。
 type geminiLiveSession struct {
-	mu         sync.Mutex // 送信時の排他制御用
+	mu         sync.Mutex
 	baseClient *genai.Client
 	modelName  string
 	config     types.LiveAPIConfig
 
-	// genai.ChatSession は、実際の Go SDK でチャット履歴と状態を管理するために使用されます。
-	// ビルドエラーを避けるため、ここでは便宜的に interface{} を使用しますが、
-	// 実際には *genai.ChatSession など適切な型に置き換える必要があります。
-	chatSession interface{}
+	// chatSession は *genai.Chat 型（GenerativeModel.StartChat の戻り値）
+	chatSession *genai.Chat
 
-	responseChan chan *types.LowLatencyResponse // AIからの応答をパイプラインに送るチャネル
-	doneChan     chan struct{}                  // セッション終了を通知するチャネル
+	responseChan chan *types.LowLatencyResponse
+	doneChan     chan struct{}
 }
 
-// newGeminiLiveSession は Session を実装した新しい geminiLiveSession を作成します。
-// Client.StartSessionから呼び出されます。
+// newGeminiLiveSession は新しい geminiLiveSession を作成します。
 func newGeminiLiveSession(client *genai.Client, modelName string, config types.LiveAPIConfig, systemInstruction string) Session {
 	log.Printf("Internal Session created - Model: %s, Instruction: %s", modelName, systemInstruction)
 
-	// 実際には、ここで genai.Client を使って ChatSession の初期化を行います。
+	// 生成モデルの取得（NewGenerativeModel を使用）
+	model := genai.NewGenerativeModel(client, modelName)
+
+	// 履歴は []*genai.Content
+	var history []*genai.Content
+	if systemInstruction != "" {
+		// genai.Part の値
+		userPart := genai.Text(systemInstruction)
+		modelPart := genai.Text("Ok, I understand.")
+
+		// Content.Parts は []genai.Part（値）
+		userContent := genai.Content{
+			Parts: []genai.Part{userPart},
+			Role:  "user",
+		}
+		modelContent := genai.Content{
+			Parts: []genai.Part{modelPart},
+			Role:  "model",
+		}
+
+		history = append(history, &userContent, &modelContent)
+	}
+
+	// StartChat の後に履歴を設定
+	chatSession := model.StartChat()
+	chatSession.History = history
 
 	return &geminiLiveSession{
 		baseClient:   client,
 		modelName:    modelName,
 		config:       config,
-		responseChan: make(chan *types.LowLatencyResponse, 10), // バッファ付きチャネル
+		chatSession:  chatSession,
+		responseChan: make(chan *types.LowLatencyResponse, 10),
 		doneChan:     make(chan struct{}),
 	}
 }
 
-// Send はデータをAIに送信し、応答処理を開始します。（仮実装）
+// Send はデータをAIに送信し、応答処理を開始します。
 func (s *geminiLiveSession) Send(ctx context.Context, data types.LiveStreamData) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	// チャットが閉じられているか確認
 	select {
 	case <-s.doneChan:
 		return errors.New("session already closed")
 	default:
-		// 続行
 	}
 
-	log.Printf("Sending data to Gemini (Placeholder) - Author: %s, Text: %v", data.Author, data.Text)
+	if s.chatSession == nil {
+		return errors.New("chat session is not initialized")
+	}
 
-	// 実際のロジック:
-	// 1. data.Text を genai.Content に変換
-	// 2. ChatSession または Streaming API を呼び出す
-	// 3. 応答ストリームを読み取り、チャンクを LowLatencyResponse に変換して s.responseChan に書き込むゴルーチンを開始
+	log.Printf("Sending data to Gemini - Author: %s, Text: %v", data.Author, data.Text)
 
-	// デモ応答を responseChan に送る（パイプラインの動作確認用）
+	// genai.Part の値を作成
+	userInput := genai.Text(data.Text)
+
+	// 非同期でストリーム処理を実行
 	go func() {
-		time.Sleep(100 * time.Millisecond) // 応答遅延をシミュレート
+		defer func() {
+			close(s.responseChan)
+			select {
+			case <-s.doneChan:
+			default:
+				close(s.doneChan)
+			}
+		}()
+
+		// 可変長引数で genai.Part を渡す
+		stream := s.chatSession.SendMessageStream(ctx, userInput)
+		var responseBuilder strings.Builder
+
+		for resp, err := range stream {
+			if err != nil {
+				log.Printf("Gemini stream error: %v", err)
+				select {
+				case s.responseChan <- &types.LowLatencyResponse{ResponseText: fmt.Sprintf("Error: %v", err.Error()), Done: true}:
+				case <-ctx.Done():
+				}
+				return
+			}
+
+			// 応答のテキスト抽出（genai.Part は interface なので型スイッチ）
+			if len(resp.Candidates) > 0 && resp.Candidates[0].Content != nil {
+				for _, part := range resp.Candidates[0].Content.Parts {
+					switch p := part.(type) {
+					case genai.Text:
+						responseBuilder.WriteString(string(p))
+					default:
+						// 他種別は無視（必要に応じて拡張）
+					}
+				}
+			}
+		}
+
 		select {
-		// types.LowLatencyResponse のフィールド名に合わせて ResponseText を使用
-		case s.responseChan <- &types.LowLatencyResponse{ResponseText: fmt.Sprintf("AI response to: %s", data.Text), Done: true}:
-			// 成功
+		case s.responseChan <- &types.LowLatencyResponse{ResponseText: responseBuilder.String(), Done: true}:
 		case <-ctx.Done():
-			// コンテキストがキャンセルされた
-		case <-s.doneChan:
-			// セッションが閉じられた
 		}
 	}()
 
 	return nil
 }
 
-// RecvResponse は完全な応答が来るまで待ち受け、それを返します。（仮実装）
+// RecvResponse は完全な応答が来るまで待ち受け、それを返します。
 func (s *geminiLiveSession) RecvResponse() (*types.LowLatencyResponse, error) {
 	select {
 	case resp, ok := <-s.responseChan:
 		if !ok {
-			return nil, io.EOF // チャネルが閉じられたら EOF を返す
+			return nil, io.EOF
 		}
 		return resp, nil
 	case <-s.doneChan:
@@ -104,13 +163,9 @@ func (s *geminiLiveSession) Close() {
 
 	select {
 	case <-s.doneChan:
-		// 既に閉じている
 		return
 	default:
-		// クローズ処理
 		close(s.doneChan)
-		// responseChan は doneChan が閉じられた後に処理を停止するため、安全のために閉じます
-		close(s.responseChan)
 		log.Println("Gemini Live Session closed.")
 	}
 }

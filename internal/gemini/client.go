@@ -10,14 +10,6 @@ import (
 	"google.golang.org/genai"
 )
 
-// Session は Gemini Live API との単一の会話セッションが満たすべきインターフェースです。
-// これは live.go で実装されます。
-type Session interface {
-	Send(ctx context.Context, data types.LiveStreamData) error
-	RecvResponse() (*types.LowLatencyResponse, error)
-	Close()
-}
-
 // Client は Gemini API との接続を管理するエクスポートされた構造体です。
 type Client struct {
 	baseClient        *genai.Client
@@ -55,6 +47,7 @@ func NewClient(ctx context.Context, apiKey string, modelName string, systemInstr
 func (c *Client) StartSession(ctx context.Context, config types.LiveAPIConfig) (Session, error) {
 
 	// 内部セッション (newGeminiLiveSession) を呼び出してセッションを作成
+	// c.baseClient は *genai.Client 型
 	session := newGeminiLiveSession(c.baseClient, c.modelName, config, c.systemInstruction)
 
 	log.Printf("New Gemini Session started for model: %s", c.modelName)
@@ -62,8 +55,11 @@ func (c *Client) StartSession(ctx context.Context, config types.LiveAPIConfig) (
 	return session, nil
 }
 
-// Close は基盤となる genai.Client 接続を閉じます。（ここでは genai.Client に Close() がないため、ロギングのみ）
+// Close は基盤となる genai.Client 接続を閉じます。
+// （現在の genai.Client には明示的な Close() メソッドがないため、ロギングのみですが、
+// 将来的なSDK更新によりリソースクリーンアップが必要になる可能性に注意してください。）
 func (c *Client) Close() {
-	log.Println("Gemini Client connection closed (Placeholder).")
+	log.Println("Gemini Client connection closed (Placeholder for potential future cleanup).")
 	// 実際には、Clientのクリーンアップロジックをここに追加します。
+	// 例: if c.baseClient != nil { /* SDKがClose()を提供した場合の呼び出し */ }
 }
