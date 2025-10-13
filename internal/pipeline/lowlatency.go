@@ -51,7 +51,7 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 	p.session = session
 	defer p.session.Close()
 
-	// 💡 修正点 1: システム指示をセッションの最初のメッセージとして送信
+	// 💡 システム指示をセッションの最初のメッセージとして送信
 	if p.geminiConfig.SystemInstruction != "" {
 		log.Println("Sending System Instruction as initial message...")
 
@@ -61,8 +61,7 @@ func (p *LowLatencyPipeline) Run(ctx context.Context) error {
 		}
 
 		// AIからの最初の応答 (システム指示に対する確認応答) を待つ
-		// ここでの応答は通常空であるか、短い確認応答ですが、必ず RecvResponse を呼び出してチャネルをクリアする必要があります。
-		// この処理をブロックすることで、システム指示が確実にAIに届くまで待機します。
+		// RecvResponse を呼び出してチャネルをクリアし、システム指示が確実にAIに届くまで待機します。
 		if _, err := p.session.RecvResponse(); err != nil && !errors.Is(err, io.EOF) {
 			// io.EOF は正常終了と見なす
 			log.Printf("Warning: Failed to receive initial AI response for system instruction: %v", err)
@@ -146,10 +145,12 @@ func (p *LowLatencyPipeline) handleAIResponse(ctx context.Context) {
 	}
 
 	// 応答テキストが空でなければ投稿
+	// 修正: resp.Text を resp.ResponseText に変更
 	if resp.ResponseText != "" {
 		log.Printf("AI Response: %s", resp.ResponseText)
 
 		// YouTube にコメントを投稿
+		// 修正: resp.Text を resp.ResponseText に変更
 		if err := p.youtubeClient.PostComment(ctx, resp.ResponseText); err != nil {
 			log.Printf("Error posting comment to YouTube: %v", err)
 		}

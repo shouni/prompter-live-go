@@ -7,11 +7,11 @@ import (
 
 	"prompter-live-go/internal/types"
 
-	"github.com/google/generative-ai-go/genai"
-	"google.golang.org/api/option"
+	"google.golang.org/genai"
 )
 
 // Session は Gemini Live API との単一の会話セッションが満たすべきインターフェースです。
+// これは live.go で実装されます。
 type Session interface {
 	Send(ctx context.Context, data types.LiveStreamData) error
 	RecvResponse() (*types.LowLatencyResponse, error)
@@ -20,9 +20,8 @@ type Session interface {
 
 // Client は Gemini API との接続を管理するエクスポートされた構造体です。
 type Client struct {
-	baseClient *genai.Client
-	modelName  string
-	// システム指示をClientレベルで保持
+	baseClient        *genai.Client
+	modelName         string
 	systemInstruction string
 }
 
@@ -33,9 +32,13 @@ func NewClient(ctx context.Context, apiKey string, modelName string, systemInstr
 	}
 
 	// 1. genai.Client の初期化
-	client, err := genai.NewClient(ctx, option.WithAPIKey(apiKey))
+	clientConfig := &genai.ClientConfig{
+		APIKey: apiKey,
+	}
+
+	client, err := genai.NewClient(ctx, clientConfig)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create genai client: %w", err)
+		return nil, fmt.Errorf("failed to create Gemini client: %w", err)
 	}
 
 	log.Printf("Gemini Client initialized with model: %s", modelName)
@@ -50,22 +53,17 @@ func NewClient(ctx context.Context, apiKey string, modelName string, systemInstr
 
 // StartSession は新しい会話セッションを開始し、その Session インターフェースを返します。
 func (c *Client) StartSession(ctx context.Context, config types.LiveAPIConfig) (Session, error) {
-	// 1. モデルを取得。
-	model := c.baseClient.GenerativeModel(c.modelName)
 
-	// 2. 内部セッション (newGeminiLiveSession) を作成
-	// c.systemInstruction を第3引数として渡し、ペルソナを適用
-	session := newGeminiLiveSession(model, config, c.systemInstruction)
+	// 内部セッション (newGeminiLiveSession) を呼び出してセッションを作成
+	session := newGeminiLiveSession(c.baseClient, c.modelName, config, c.systemInstruction)
 
 	log.Printf("New Gemini Session started for model: %s", c.modelName)
 
-	// 3. Sessionインターフェースとして返す
 	return session, nil
 }
 
-// Close は基盤となる genai.Client 接続を閉じます。
+// Close は基盤となる genai.Client 接続を閉じます。（ここでは genai.Client に Close() がないため、ロギングのみ）
 func (c *Client) Close() {
-	if c.baseClient != nil {
-		c.baseClient.Close()
-	}
+	log.Println("Gemini Client connection closed (Placeholder).")
+	// 実際には、Clientのクリーンアップロジックをここに追加します。
 }
