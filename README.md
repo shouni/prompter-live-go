@@ -2,6 +2,7 @@
 
 [![Language](https://img.shields.io/badge/Language-Go-blue)](https://golang.org/)
 [![Go Version](https://img.shields.io/badge/Go%20Version-1.21%2B-blue)](https://golang.org/)
+[![GitHub tag (latest by date)](https://img.shields.io/github/v/tag/shouni/prompter-live-go)](https://github.com/shouni/prompter-live-go/tags)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 ## 🚀 概要 (About) - リアルタイム対話とAIプロモーションの**可能性を実証するPoCツール**
